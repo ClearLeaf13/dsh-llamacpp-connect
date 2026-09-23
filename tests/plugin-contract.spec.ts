@@ -42,8 +42,10 @@ describe('插件入口的 ctx 用法契约', () => {
     expect(codeOnly).toMatch(/ctx\.inject\(\s*\['webServer'\]/)
   })
 
-  it('通过 register 注册 HTTP 路由', () => {
-    expect(codeOnly).toMatch(/\.register\(\{/)
+  it('通过 register 注册 HTTP 路由（经幂等包装）', () => {
+    // 现在统一走 registerOnce，内部才调 server.register
+    expect(codeOnly).toMatch(/server\.register\(route\)|\.register\(\{/)
+    expect(codeOnly).toMatch(/registerOnce/)
   })
 
   it('两个路由路径都在源码里声明', () => {
@@ -139,4 +141,120 @@ describe('客户端与宿主的路由路径一致', () => {
       expect(client).toContain(p)
     })
   }
+})
+
+/**
+ * 防回归：路由注册必须幂等，能扛过 Cordis 的 HMR `Fiber._reload()`。
+ *
+ * 真实故障（线上稳定复现，每次重启都出现）：
+ *
+ *   webserver: duplicate exact route "/plugins/dsh-llamacpp-connect/status"
+ *       at callback (lib/index.js:614) -> Proxy.inject -> apply (612)
+ *   cannot create effect on inactive context
+ *       at apply (lib/index.js:645) -> Fiber.effect
+ *
+ * 触发链（取自线上完整调用栈）：
+ *   Fiber._reload (cordis:1355)        ← HMR config reload
+ *     -> Fiber._execute (1136)
+ *       -> apply 被**再次执行**（同一个 fiber）
+ *         -> ctx.inject 回调重跑 -> 重复注册 -> 抛错
+ *         -> 外层 ctx 已失效 -> ctx.effect -> INACTIVE_EFFECT
+ *
+ * 关键结论（实测五种写法得出）：
+ *   「把 register 的 disposer 登记好」**解决不了**这个问题 ——
+ *   `_reload` 重跑 `apply` 时上一轮的清理尚未完成，路由仍在宿主的
+ *   全局路由表里。唯一可靠的做法是**注册前先探测，已存在则跳过**。
+ */
+describe('路由注册幂等（扛 HMR reload）', () => {
+  /** 最小 WebServer 桩：与 dsh-host-webserver 的 register 语义一致 */
+  function makeWebServer() {
+    const exact = new Map<string, unknown>()
+    return {
+      exact,
+      register(route: { kind: string; path: string }) {
+        if (exact.has(route.path)) {
+          throw new Error(
+            `webserver: duplicate ${route.kind} route "${route.path}"`,
+          )
+        }
+        exact.set(route.path, route)
+        return () => exact.delete(route.path)
+      },
+    }
+  }
+
+  it('宿主 WebServer 对重复路由确实会抛错（前提验证）', () => {
+    const ws = makeWebServer()
+    ws.register({ kind: 'exact', path: '/x' })
+    expect(() => ws.register({ kind: 'exact', path: '/x' })).toThrow(
+      /duplicate exact route/,
+    )
+  })
+
+  it('源码使用幂等守卫，而不是仅依赖 disposer', async () => {
+    const src = readFileSync(join(process.cwd(), 'src', 'index.ts'), 'utf8')
+    const codeOnly = src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '')
+
+    // 必须有「已注册则跳过」的判断（registeredRoutes.has / exact.has 之类）
+    expect(codeOnly).toMatch(/registeredRoutes\.has\(|exact\.has\(/)
+  })
+
+  it('HMR _reload 后不抛 duplicate route', async () => {
+    const { Context } = await import('@deepseek-ai/cordis')
+    const root = new Context()
+    const ws = makeWebServer()
+    root.provide('webServer', ws)
+    // 插件的顶层 inject 是 ['llm']，缺它 fiber 不会激活到 apply
+    root.provide('llm', { registerAdapter: () => () => {} })
+
+    // 用真实的插件 apply（从源码构建产物加载）
+    const mod = (await import(
+      'file://' + join(process.cwd(), 'lib', 'index.js').replace(/\\/g, '/')
+    )) as {
+      name: string
+      inject: string[]
+      Config: unknown
+      apply: (ctx: unknown, config: unknown) => () => void
+    }
+
+    const plugin = {
+      name: mod.name,
+      inject: mod.inject,
+      Config: mod.Config,
+      apply: mod.apply,
+    }
+
+    const fiber = await root.plugin(plugin, {
+      managerDir: join(process.cwd(), '__nonexistent__'),
+      autoStart: false,
+    })
+    const afterFirst = ws.exact.size
+    expect(afterFirst, '首次 apply 应注册 2 条路由').toBe(2)
+
+    // 复现线上路径：HMR 触发 _reload，重新执行 apply
+    const errors: string[] = []
+    const ctxLogger = (
+      fiber as unknown as { ctx: { logger: { error: (e: unknown) => void } } }
+    ).ctx
+    const origError = ctxLogger.logger.error
+    ctxLogger.logger.error = (e: unknown) => {
+      errors.push(String((e as Error)?.message ?? e))
+    }
+
+    await (fiber as unknown as { _reload: () => Promise<void> })._reload()
+
+    ctxLogger.logger.error = origError
+
+    expect(
+      errors.filter((e) => e.includes('duplicate exact route')),
+      `_reload 后出现重复路由: ${errors.join(' | ')}`,
+    ).toHaveLength(0)
+    expect(
+      errors.filter((e) => e.includes('inactive context')),
+      `_reload 后出现 INACTIVE_EFFECT: ${errors.join(' | ')}`,
+    ).toHaveLength(0)
+    expect(ws.exact.size, '_reload 后路由数应仍为 2').toBe(2)
+  })
 })

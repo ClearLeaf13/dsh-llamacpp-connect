@@ -29,6 +29,15 @@ export const STATUS_PATH = '/plugins/dsh-llamacpp-connect/status'
 /** 同步触发路径（POST） */
 export const SYNC_PATH = '/plugins/dsh-llamacpp-connect/sync'
 
+/**
+ * 本插件已注册的路由路径。
+ *
+ * 放在模块级而非 apply 内部：Cordis 的 HMR `Fiber._reload()` 会重新执行
+ * `apply`（可能产生新的闭包），但模块实例是同一个。用它作为「注册前探测」
+ * 的兜底依据，避免宿主路由表查询不可用时重复注册。
+ */
+const registeredRoutes = new Set<string>()
+
 /** 路由响应的最小接口 —— 只用到 writeHead/end，避免依赖具体实现 */
 interface RouteResponse {
   writeHead: (code: number, headers: Record<string, string>) => void
@@ -109,7 +118,7 @@ export async function loadModels(
   return { ok: true, location, models, skipped }
 }
 
-export function apply(ctx: Context, config: Config): void {
+export function apply(ctx: Context, config: Config): () => void {
   const state: RuntimeState = {
     models: [],
     skipped: [],
@@ -285,12 +294,54 @@ export function apply(ctx: Context, config: Config): void {
    * `cannot get property "webServer" without inject` 并导致插件加载失败。
    * 用 inject 同时获得优雅降级：宿主没有 webServer 服务时回调不执行，
    * provider 注册不受影响。
+   *
+   * **注册必须幂等**：Cordis 的 HMR `Fiber._reload()` 会在**同一个 fiber**
+   * 上重新执行整个 `apply`。而宿主的路由表是全局的，上一轮注册的路由
+   * （`_reload` 时上一轮的清理尚未完成）仍在表里，重复注册会抛
+   * `webserver: duplicate exact route "..."`，进而让整个插件加载失败。
+   *
+   * 注意：实测「把 register 的 disposer 登记好」**解决不了**这个问题
+   * （返回 disposer、包进 ctx.effect 都不行），因为重跑发生在清理之前。
+   * 唯一可靠的做法是注册前先探测、已存在则跳过。
    */
   ctx.inject(['webServer'], (webCtx: unknown) => {
-    const server = (webCtx as { webServer: { register: (r: unknown) => () => void } }).webServer
+    const server = (
+      webCtx as {
+        webServer: {
+          register: (r: unknown) => () => void
+          exact?: { has?: (path: string) => boolean }
+        }
+      }
+    ).webServer
+
+    /**
+     * 判断某路径是否已注册。
+     *
+     * 优先问宿主的路由表（`exact`），拿不到就回退到本模块自己记的集合 ——
+     * `exact` 是宿主内部字段，没有类型声明，不能当作稳定的公开 API 依赖。
+     */
+    const alreadyRegistered = (path: string): boolean => {
+      if (registeredRoutes.has(path)) return true
+      try {
+        return server.exact?.has?.(path) === true
+      } catch {
+        return false
+      }
+    }
+
+    /** 注册一条路由；已存在则跳过，避免 HMR 重跑时撞车 */
+    const registerOnce = (route: {
+      kind: 'exact'
+      path: string
+      handler: (req: { method?: string }, res: RouteResponse) => unknown
+    }): void => {
+      if (alreadyRegistered(route.path)) return
+      server.register(route)
+      registeredRoutes.add(route.path)
+    }
 
     // 状态查询
-    server.register({
+    registerOnce({
       kind: 'exact',
       path: STATUS_PATH,
       handler: async (req: { method?: string }, res: RouteResponse) => {
@@ -302,7 +353,7 @@ export function apply(ctx: Context, config: Config): void {
     })
 
     // 触发同步 —— 配置页的「同步模型」按钮打这里
-    server.register({
+    registerOnce({
       kind: 'exact',
       path: SYNC_PATH,
       handler: async (req: { method?: string }, res: RouteResponse) => {
@@ -325,10 +376,16 @@ export function apply(ctx: Context, config: Config): void {
     ctx.logger?.warn?.('dsh-llamacpp-connect: 首次同步失败', e)
   })
 
-  // 插件卸载时清理注册，避免残留 provider
-  ctx.effect?.(() => () => {
+  // 插件卸载时清理注册，避免残留 provider。
+  //
+  // 这里**返回** disposer 而不是调 ctx.effect：HMR `Fiber._reload()` 重跑
+  // `apply` 时，外层 ctx 对应的 fiber 已失效，`ctx.effect` 会抛
+  // `cannot create effect on inactive context`。而 apply 的返回值会被
+  // Cordis 的 runner 直接收集（cordis/lib/index.js:1140/1068），
+  // 不经过 fiber 活跃性检查，重跑时同样能正确登记。
+  return () => {
     unregisterAll()
-  })
+  }
 }
 
 export { parseModels, providerIdFor, baseUrlFor } from './config-store.js'
