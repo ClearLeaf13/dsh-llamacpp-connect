@@ -258,3 +258,47 @@ describe('路由注册幂等（扛 HMR reload）', () => {
     expect(ws.exact.size, '_reload 后路由数应仍为 2').toBe(2)
   })
 })
+
+/**
+ * 防回归：client 产物必须是 DSH 客户端模块格式，不能是原生 ESM。
+ *
+ * 真实故障：client 半用 `format: 'esm'` 产出顶层 `import React ...`，
+ * 被 concat 进非 module 的 combo script 后浏览器抛
+ * "Cannot use import statement outside a module"，并连带把同批其它插件的
+ * client bundle 一起炸掉（导致整个 web profile 进入 safe mode）。
+ *
+ * 正确产物形状（与 dsh-workbuddy-connect/lib/client.js 一致）：
+ *   window.__ModuleLoader__.load({ id, factory: (require) => { ... } })
+ * 执行时只登记 factory，工厂体经注入的 require 解析 react 等外部依赖，
+ * 返回 { apply, inject }。
+ */
+describe('client 产物格式（DSH 客户端模块）', () => {
+  const clientPath = join(process.cwd(), 'lib', 'client', 'index.js')
+
+  it('产物存在且以 __ModuleLoader__.load 包裹', () => {
+    let raw: string
+    try {
+      raw = readFileSync(clientPath, 'utf8')
+    } catch {
+      throw new Error(`client 产物未构建：${clientPath} 不存在，请先 pnpm run build`)
+    }
+    expect(raw).toContain('window.__ModuleLoader__.load({')
+    expect(raw).toMatch(/factory:\s*\(require\)\s*=>/)
+  })
+
+  it('产物不含顶层 ESM import（这是浏览器崩溃的根因）', () => {
+    const raw = readFileSync(clientPath, 'utf8')
+    const lines = raw.split('\n')
+    const topLevelImports = lines.filter((l) => /^import\s/.test(l.trim()))
+    expect(
+      topLevelImports,
+      `发现顶层 import（必须经 require 注入）: ${topLevelImports.join(' | ')}`,
+    ).toHaveLength(0)
+  })
+
+  it('产物在 factory 体内声明 module/exports 并返回', () => {
+    const raw = readFileSync(clientPath, 'utf8')
+    expect(raw).toContain('var module = { exports: {} }')
+    expect(raw).toContain('return module.exports')
+  })
+})
