@@ -36,6 +36,9 @@ const NS = 'settings.llamacpp'
  */
 export const inject = ['slots', 'locale']
 
+/** 插件名：client 半的 name 与 host 半一致，供 loader 识别 */
+export const name = 'dsh-llamacpp-connect'
+
 export interface ModelRow {
   id: string
   name: string
