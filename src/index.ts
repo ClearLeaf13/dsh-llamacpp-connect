@@ -1,10 +1,14 @@
 /**
  * dsh-llamacpp-connect — 把本地 llama.cpp 管理器的模型接入 DeepSeek Harness。
  *
- * 工作方式：
+ * host 半职责：
  *   1. 定位管理器数据目录，读出它维护的模型列表
  *   2. 每个模型注册为一个独立 provider，指向该模型的 llama-server 端口
- *   3. 选中未运行的模型时，先请管理器把它启动起来，再转发请求
+ *   3. 注册两个同源 HTTP 路由，供 client 半读取状态、触发同步
+ *
+ * 设置面板（主设置 → 左侧导航「llama.cpp Connect」）完全由 client 半通过
+ * DSH 官方的 `settings.section` slot 注册，host 半不参与 —— 这是官方推荐的
+ * 挂载点（`@deepseek-ai/dsh-client-ui-settings-general` 声明，注册即可见）。
  *
  * @module dsh-llamacpp-connect
  */
@@ -63,25 +67,6 @@ export const Config: z<Config> = z.object({
   autoStart: z.boolean().default(true),
 })
 
-/**
- * 设置命名空间 —— 这是「设置 → 插件 → 插件配置」面板能显示本卡片的关键。
- *
- * DSH 0.1.5 的插件配置页渲染 `settings.plugin.item`（keyed slot），
- * 每个卡片的 `key` 必须等于一个**宿主实际服务的设置命名空间**；
- * 两者取交集才显示。所以 host 半必须经 `ctx.settings.installSection()`
- * 把这个命名空间注册进 settings 服务，client 半的卡片 `key` 再用同一个值。
- *
- * 参考 dsh-workbuddy-connect：host 调 installSection(ctx, NS, section, config)，
- * client 注册 settings.plugin.item 时 key: NS。
- */
-export const SETTINGS_NS = 'llamacpp'
-
-/** 设置区 schema：与 Config 对应，供 settings.yaml / TUI / 插件配置页读写 */
-const SETTINGS_SECTION = z.object({
-  managerDir: z.string().default(''),
-  autoStart: z.boolean().default(true),
-})
-
 /** 当前已注册的 provider id，用于同步时先撤旧再登新 */
 type Registration = {
   model: ManagerModel
@@ -89,7 +74,7 @@ type Registration = {
   dispose: () => void
 }
 
-/** 插件运行期状态，挂在 ctx 上供客户端配置页查询 */
+/** 插件运行期状态，供状态路由组装响应体 */
 export interface RuntimeState {
   location?: ManagerLocation
   models: ManagerModel[]
@@ -257,9 +242,6 @@ export function apply(ctx: Context, config: Config): () => void {
 
   /**
    * 组装状态路由的响应体。
-   *
-   * 定义在 ctx.inject 之前：虽然在柯里化回调里引用也不会出错（回调异步执行），
-   * 但按依赖顺序排列更易读，也避免日后有人把回调改成同步时踩坑。
    */
   const buildStatusPayload = async () => {
     if (!state.location) {
@@ -304,9 +286,7 @@ export function apply(ctx: Context, config: Config): () => void {
   }
 
   /**
-   * 注册 HTTP 路由，供配置页读取数据与触发同步。
-   *
-   * host 与 client 之间走同源 HTTP —— client 在网页里 fetch 这些路径。
+   * 注册 HTTP 路由，供 client 半读取数据与触发同步。
    *
    * 关键：`ctx.webServer` 是**服务**，访问它必须通过 `ctx.inject([...])`
    * 拿到注入了该服务的子上下文。直接读 `ctx.webServer` 会抛
@@ -315,13 +295,8 @@ export function apply(ctx: Context, config: Config): () => void {
    * provider 注册不受影响。
    *
    * **注册必须幂等**：Cordis 的 HMR `Fiber._reload()` 会在**同一个 fiber**
-   * 上重新执行整个 `apply`。而宿主的路由表是全局的，上一轮注册的路由
-   * （`_reload` 时上一轮的清理尚未完成）仍在表里，重复注册会抛
-   * `webserver: duplicate exact route "..."`，进而让整个插件加载失败。
-   *
-   * 注意：实测「把 register 的 disposer 登记好」**解决不了**这个问题
-   * （返回 disposer、包进 ctx.effect 都不行），因为重跑发生在清理之前。
-   * 唯一可靠的做法是注册前先探测、已存在则跳过。
+   * 上重新执行整个 `apply`，宿主路由表是全局的，重复注册会抛
+   * `webserver: duplicate exact route "..."`。注册前先探测、已存在则跳过。
    */
   ctx.inject(['webServer'], (webCtx: unknown) => {
     const server = (
@@ -333,12 +308,6 @@ export function apply(ctx: Context, config: Config): () => void {
       }
     ).webServer
 
-    /**
-     * 判断某路径是否已注册。
-     *
-     * 优先问宿主的路由表（`exact`），拿不到就回退到本模块自己记的集合 ——
-     * `exact` 是宿主内部字段，没有类型声明，不能当作稳定的公开 API 依赖。
-     */
     const alreadyRegistered = (path: string): boolean => {
       if (registeredRoutes.has(path)) return true
       try {
@@ -348,7 +317,6 @@ export function apply(ctx: Context, config: Config): () => void {
       }
     }
 
-    /** 注册一条路由；已存在则跳过，避免 HMR 重跑时撞车 */
     const registerOnce = (route: {
       kind: 'exact'
       path: string
@@ -393,44 +361,6 @@ export function apply(ctx: Context, config: Config): () => void {
   void sync().catch((e) => {
     state.lastError = (e as Error).message
     ctx.logger?.warn?.('dsh-llamacpp-connect: 首次同步失败', e)
-  })
-
-  // 注册设置命名空间：让「设置 → 插件 → 插件配置」面板能显示本卡片。
-  //
-  // 面板取「宿主服务的命名空间」与「注册进 settings.plugin.item 的卡片 key」
-  // 的交集；host 半不 installSection，client 半的卡片就不会被派发。
-  // settings 是可选依赖，缺它时优雅跳过，不影响 provider 注册。
-  ctx.inject(['settings'], (settingsCtx: unknown) => {
-    const settings = (
-      settingsCtx as {
-        settings?: {
-          installSection?: (
-            owner: unknown,
-            ns: string,
-            schema: unknown,
-            entry: unknown,
-            hooks: { setSource: (s: () => Config) => void; onChange: () => void },
-          ) => void
-        }
-      }
-    ).settings
-
-    if (typeof settings?.installSection !== 'function') {
-      ctx.logger?.warn?.(
-        'dsh-llamacpp-connect: host settings service has no installSection; 插件配置页卡片不可用',
-      )
-      return
-    }
-
-    settings.installSection(ctx, SETTINGS_NS, SETTINGS_SECTION, config, {
-      setSource(source) {
-        // settings 服务的源码回填；本插件 config 由 cordis 注入，无需额外处理
-        void source
-      },
-      onChange() {
-        // 配置变化时无需重载 —— 状态路由每次请求都实时读 config
-      },
-    })
   })
 
   // 插件卸载时清理注册，避免残留 provider。

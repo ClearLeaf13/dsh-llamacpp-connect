@@ -16,7 +16,9 @@ import { defineConfig } from 'tsdown'
  * 其它插件的 client bundle 一起炸掉（正是本次线上报错的根因）。
  *
  * 参考：deepseek-harness packages/client/tsdown.client.ts 的 clientBundle
- * preset，以及 dsh-workbuddy-connect/lib/client.js 的实际产物头尾。
+ * preset，以及官方 client 包（@deepseek-ai/dsh-client-ui-settings-general /
+ * dsh-client-ui-settings-models 等）lib/client.js 的实际产物头尾 —— 它们都是
+ * 裸 `let react = require("react")`，无 `__toESM` 包装。
  */
 
 const CLIENT_ID = 'dsh-llamacpp-connect'
@@ -29,7 +31,8 @@ const CLIENT_ID = 'dsh-llamacpp-connect'
  * 时退回 `{}`，`react.useState` 变 undefined，渲染期抛
  * `Cannot read properties of null (reading 'useState')`。
  *
- * 正确做法（对齐 dsh-workbuddy-connect/lib/client.js）：
+ * 正确做法（对齐官方 client 包的产物形态，如
+ * @deepseek-ai/dsh-client-ui-settings-general/lib/client.js）：
  * react 由 banner 里手写 `const react = require("react")` 注入为模块内变量，
  * 源码里 `declare const react` 只做类型引用，不写 import。这样产物是
  * 无 `__toESM` 包装的裸 `require`，`react.useState` 直接可用。
@@ -67,7 +70,7 @@ export default defineConfig([
     banner: (chunk) => {
       // 入口 chunk 是主 factory；多 chunk 时用 chunk: 字段（本插件单入口，仅主）
       // 必须在 factory 体内声明 module/exports，产物里的 exports.xxx / module.exports
-      // 才能解析（与 dsh-workbuddy-connect/lib/client.js 头部一致）。
+      // 才能解析（与官方 client 包 lib/client.js 头部一致）。
       //
       // react / react/jsx-runtime 在此以裸 require 注入为模块内变量，避免 rolldown
       // 对 external 的 `__toESM` 包装（那会让 react.useState 变 undefined）。

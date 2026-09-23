@@ -290,7 +290,8 @@ describe('路由注册幂等（扛 HMR reload）', () => {
  * "Cannot use import statement outside a module"，并连带把同批其它插件的
  * client bundle 一起炸掉（导致整个 web profile 进入 safe mode）。
  *
- * 正确产物形状（与 dsh-workbuddy-connect/lib/client.js 一致）：
+ * 正确产物形状（与官方 client 包 lib/client.js 一致，如
+ * @deepseek-ai/dsh-client-ui-settings-general）：
  *   window.__ModuleLoader__.load({ id, factory: (require) => { ... } })
  * 执行时只登记 factory，工厂体经注入的 require 解析 react 等外部依赖，
  * 返回 { apply, inject }。
@@ -330,7 +331,7 @@ describe('client 产物格式（DSH 客户端模块）', () => {
     //   let react = require("react"); react = __toESM(react, 1)
     // __toESM 拿不到具名导出时退回 {}，react.useState 变 undefined，
     // 渲染期抛 `Cannot read properties of null (reading 'useState')`。
-    // 对齐 dsh-workbuddy-connect：react 由 banner 裸 require 注入，无包装。
+    // 对齐官方 client 包：react 由 banner 裸 require 注入，无包装。
     const raw = readFileSync(clientPath, 'utf8')
     expect(raw).toMatch(/const react = require\("react"\)/)
     expect(raw).toMatch(/const react_jsx_runtime = require\("react\/jsx-runtime"\)/)

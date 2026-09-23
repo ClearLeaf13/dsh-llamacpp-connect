@@ -1,66 +1,49 @@
 /**
- * 配置页：显示管理器连接状态、模型列表，并提供「同步」按钮。
+ * client 半：把一张卡片注册进 DSH 主设置面板（设置 → 左侧导航项）。
  *
- * host 与 client 之间的数据通道是同源 HTTP —— 宿主用
- * `ctx.webServer.register()` 注册两个路由，这里直接 fetch。
- * 不走 ctx 上的自定义属性：Cordis 的上下文是服务容器，未 provide 的
- * key 不允许赋值。
+ * 挂载点照官方 `settings.section` slot（`@deepseek-ai/dsh-client-ui-settings-general`
+ * 声明，kind: 'list'）—— 注册项提供 `name` + `id` + `order` + `label`，注册即可见。
+ * 官方示例（`@deepseek-ai/dsh-cordis-client-runner` 的 slots 契约）：
  *
- * 入口形态：DSH 的 client 模块系统要求导出 `apply(ctx)` + `inject`，
- * 由 apply 把卡片注册进「设置 → 插件」。只导出裸 React 组件是不够的——
- * 宿主拿到组件的 `default` 无事可做，面板不会出现，而 host 侧 provider
- * 注册照常工作，于是表现为「模型能用但设置里找不到面板」。
+ *   return {
+ *     inject: ['slots'],
+ *     apply(ctx) {
+ *       ctx.slots.inject('settings.section', () => ctx.slots.register(
+ *         { name: 'settings.section', id: 'my-entry', order: 100, label: 'My entry' },
+ *         () => React.createElement('div', null, 'hello'),
+ *       ))
+ *     },
+ *   }
+ *
+ * 组件用 `react.createElement` 渲染、`react.useState` 等 hook 管理状态，
+ * 与官方 client 包的产物形态一致（裸 `let react = require("react")`）。
+ *
+ * host 与 client 之间的数据通道是同源 HTTP —— 宿主用 `ctx.webServer.register()`
+ * 注册两个路由，这里直接 fetch，不往 ctx 挂自定义属性。
  *
  * @module dsh-llamacpp-connect/client
  */
 
 /**
- * react / react/jsx-runtime 由构建 banner 以 `require("react")` / `require("react/jsx-runtime")`
- * 注入为模块内变量（见 tsdown.config.ts 的 client 面），这里只声明类型、不写 import。
- *
- * 为什么不能 `import React from 'react'`：rolldown 对 `external` 的 CJS 默认导入
- * 会生成 `react = __toESM(require("react"), 1)` 包装。`__toESM` 在 `mod == null`
- * 或拿不到具名导出时会退回 `{}`，于是 `react.useState` 变成 undefined，
- * 渲染期抛 `Cannot read properties of null (reading 'useState')`，插件被 safe-mode 禁用。
- *
- * 参考 dsh-workbuddy-connect/lib/client.js 的产物头：它是
- * `let react = require("react")`（无包装）后直接 `react.useState`，本插件照此对齐。
+ * react / react/jsx-runtime 由构建 banner 以裸 `require("react")` /
+ * `require("react/jsx-runtime")` 注入为模块内变量（见 tsdown.config.ts），
+ * 这里只做类型声明、不写 import —— 这是官方 client 包的产物形态，
+ * 避免 rolldown 对 external 的 `__toESM` 包装把 `react.useState` 弄成 null。
  */
 declare const react: typeof import('react')
 declare const react_jsx_runtime: typeof import('react/jsx-runtime')
 
-const { useCallback, useEffect, useState } = react
-const React = react
+/** 纯类型导入：只用于标注组件返回类型，不产生运行时代码 */
+import type { ReactElement } from 'react'
 
 /** 与宿主约定的路径，需与 index.ts 的 STATUS_PATH / SYNC_PATH 保持一致 */
 export const STATUS_PATH = '/plugins/dsh-llamacpp-connect/status'
 export const SYNC_PATH = '/plugins/dsh-llamacpp-connect/sync'
 
-/**
- * 卡片在设置面板里的 id。
- *
- * `settings.section` 是 **list** slot（`kind: 'list'`，由
- * `@deepseek-ai/dsh-client-ui-settings-general` 声明），注册项需要
- * `name` + `id` + `label`，**不需要** `key`。
- *
- * 与 `settings.plugin.item`（keyed，且要求 key 命中宿主服务的设置命名空间、
- * 取交集才显示）不同，`settings.section` 没有那层过滤：注册即可见，
- * 因此主设置面板是更稳妥的挂载点。
- */
+/** 卡片在设置面板里的 id（settings.section 是 list slot，需要 id） */
 export const SECTION_ID = 'llamacpp-connect'
 
-/**
- * 依赖的客户端服务。
- *
- * 只需要 `slots`：面板注册靠它。**不要注入 locale** —— 一旦注入，
- * 宿主会在 slot 渲染时把 `t` 塞进 kit，而合并顺序里 ownerProps/injected
- * 可能让组件最终读到 ctx 上的 `t`，触发
- * `cannot get property "t" without inject` 导致插件加载失败。
- * 文案改用模块内常量（见下方 `t`），不依赖宿主。
- *
- * `slots` 由 `@deepseek-ai/dsh-client-ui-renderer` 提供，必须出现在
- * package.json 的 `dsh.client.inject` 里，Cordis 才会在 fiber 启动前备好。
- */
+/** 依赖的客户端服务：面板注册靠 slots */
 export const inject = ['slots']
 
 /** 插件名：client 半的 name 与 host 半一致，供 loader 识别 */
@@ -87,12 +70,7 @@ export interface StatusPayload {
   lastError?: string
 }
 
-/**
- * 文案字典。
- *
- * `register(ns, { zh, en })` 要求 locale id 是 BCP 47 风格标签，
- * 且同一 namespace 下不能重复注册同一语言。
- */
+/** 卡片文案：模块内自足，不依赖宿主 locale 注入 */
 const zh = {
   cardTitle: 'llama.cpp Connect',
   cardDesc: '把本地 llama.cpp 管理器里的模型接入 DeepSeek Harness',
@@ -114,44 +92,12 @@ const zh = {
   readError: '无法读取状态：{reason}',
   unknownReason: '未知原因',
   skipped: '已跳过 {count} 条异常配置：',
-}
+} as const
 
-const en: typeof zh = {
-  cardTitle: 'llama.cpp Connect',
-  cardDesc: 'Bring local llama.cpp manager models into DeepSeek Harness',
-  connected: 'Manager connected',
-  canAutoStart: 'Auto-start available',
-  syncOnly: 'Sync only (no control API)',
-  syncBtn: 'Sync models',
-  syncing: 'Syncing…',
-  retry: 'Retry',
-  recheck: 'Re-check',
-  loading: 'Loading…',
-  notInstalled:
-    'No llama.cpp manager detected. Install and run it, then configure models there.',
-  running: 'Running',
-  notRunning: 'Stopped',
-  vision: 'Vision',
-  syncDone: 'Synced {count} model(s)',
-  syncFailed: 'Sync failed: {reason}',
-  syncError: 'Sync error: {reason}',
-  readError: 'Cannot read status: {reason}',
-  unknownReason: 'unknown error',
-  skipped: 'Skipped {count} invalid entr(ies):',
-}
+type CopyKey = keyof typeof zh
 
-/** 翻译函数签名（保持导出，供将来接回 locale 服务） */
-export type Translate = (key: keyof typeof zh, params?: Record<string, unknown>) => string
-
-/**
- * 卡片文案：模块内自足，**不依赖宿主注入**。
- *
- * 这是刻意的取舍：宿主在 slot 渲染时可能把 ctx 本身当 props 传下来，
- * 而组件里读 `props.t` 就会打到 Cordis 的 `ctx.t`，抛
- * `cannot get property "t" without inject` —— 整个插件加载失败。
- * 因此卡片不从 props 取任何文案，全部用模块内常量。
- */
-const t: Translate = (key, params) => {
+/** 翻译函数（模块内自足） */
+function t(key: CopyKey, params?: Record<string, unknown>): string {
   const template: string = zh[key] ?? String(key)
   if (!params) return template
   return template.replace(/\{(\w+)\}/g, (_, k: string) => String(params[k] ?? ''))
@@ -189,33 +135,32 @@ const styles = {
 }
 
 /**
- * 卡片组件。
+ * 卡片组件：显示管理器连接状态、模型列表，并提供「同步模型」按钮。
  *
- * **不接受任何 props**：文案用模块内常量，数据走同源 HTTP fetch。
- * 因此宿主无论传 ctx、传空对象还是不传，都不会触发属性查找。
+ * 照官方写法：用 `react.createElement` 渲染、`react.useState` 等 hook 管理状态。
+ * 数据走同源 HTTP fetch（STATUS_PATH / SYNC_PATH）。
  */
-export function ConfigPage(): React.ReactElement {
-  const [state, setState] = useState<StatusPayload | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState('')
+export function ConfigPage(): ReactElement {
+  const [state, setState] = react.useState<StatusPayload | null>(null)
+  const [busy, setBusy] = react.useState(false)
+  const [message, setMessage] = react.useState('')
 
-  const refresh = useCallback(async () => {
+  const refresh = react.useCallback(async () => {
     try {
       const res = await fetch(STATUS_PATH)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       setState((await res.json()) as StatusPayload)
       setMessage('')
     } catch (e) {
-      // 宿主路由没注册时也会走到这里（例如 webServer 服务不可用）
       setMessage(t('readError', { reason: (e as Error).message }))
     }
   }, [])
 
-  useEffect(() => {
+  react.useEffect(() => {
     void refresh()
   }, [refresh])
 
-  const onSync = useCallback(async () => {
+  const onSync = react.useCallback(async () => {
     setBusy(true)
     setMessage('')
     try {
@@ -240,89 +185,110 @@ export function ConfigPage(): React.ReactElement {
   }, [])
 
   if (message && !state) {
-    return React.createElement('div', { style: styles.wrap },
-      React.createElement('div', { style: { ...styles.hint, color: '#d13b3b' } }, message),
-      React.createElement('div', { style: styles.row },
-        React.createElement('button', { style: styles.btn, onClick: refresh }, t('retry'))))
+    return react.createElement(
+      'div',
+      { style: styles.wrap },
+      react.createElement('div', { style: { ...styles.hint, color: '#d13b3b' } }, message),
+      react.createElement(
+        'div',
+        { style: styles.row },
+        react.createElement('button', { style: styles.btn, onClick: refresh }, t('retry')),
+      ),
+    )
   }
 
-  if (!state) return React.createElement('div', { style: styles.hint }, t('loading'))
+  if (!state) return react.createElement('div', { style: styles.hint }, t('loading'))
 
   if (!state.installed) {
-    return React.createElement('div', { style: styles.wrap },
-      React.createElement('div', { style: styles.hint }, t('notInstalled')),
-      React.createElement('div', { style: styles.row },
-        React.createElement('button', { style: styles.btn, onClick: onSync, disabled: busy },
-          busy ? t('syncing') : t('recheck'))),
-      message && React.createElement('div', { style: styles.hint }, message),
+    return react.createElement(
+      'div',
+      { style: styles.wrap },
+      react.createElement('div', { style: styles.hint }, t('notInstalled')),
+      react.createElement(
+        'div',
+        { style: styles.row },
+        react.createElement(
+          'button',
+          { style: styles.btn, onClick: onSync, disabled: busy },
+          busy ? t('syncing') : t('recheck'),
+        ),
+      ),
+      message && react.createElement('div', { style: styles.hint }, message),
       state.lastError &&
-        React.createElement('div', { style: { ...styles.hint, color: '#b8791a' } }, state.lastError))
+        react.createElement('div', { style: { ...styles.hint, color: '#b8791a' } }, state.lastError),
+    )
   }
 
-  return React.createElement(
+  return react.createElement(
     'div',
     { style: styles.wrap },
 
-    React.createElement('div', { style: styles.row },
-      React.createElement('span', { style: styles.badge(true) }, t('connected')),
-      React.createElement('span', { style: styles.badge(state.controlApi) },
-        state.controlApi ? t('canAutoStart') : t('syncOnly')),
-      React.createElement('button', {
-        style: { ...styles.btn, marginLeft: 'auto' },
-        onClick: onSync,
-        disabled: busy,
-      }, busy ? t('syncing') : t('syncBtn'))),
+    react.createElement(
+      'div',
+      { style: styles.row },
+      react.createElement('span', { style: styles.badge(true) }, t('connected')),
+      react.createElement(
+        'span',
+        { style: styles.badge(state.controlApi) },
+        state.controlApi ? t('canAutoStart') : t('syncOnly'),
+      ),
+      react.createElement(
+        'button',
+        { style: { ...styles.btn, marginLeft: 'auto' }, onClick: onSync, disabled: busy },
+        busy ? t('syncing') : t('syncBtn'),
+      ),
+    ),
 
     state.managerDir &&
-      React.createElement('div', { style: { ...styles.hint, ...styles.mono } }, state.managerDir),
+      react.createElement('div', { style: { ...styles.hint, ...styles.mono } }, state.managerDir),
 
-    React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 7 } },
+    react.createElement(
+      'div',
+      { style: { display: 'flex', flexDirection: 'column', gap: 7 } },
       ...state.models.map((m) =>
-        React.createElement('div', { key: m.id, style: styles.card },
-          React.createElement('div', { style: styles.row },
-            React.createElement('span', { style: { fontWeight: 550 } }, m.name),
-            m.vision && React.createElement('span', { style: styles.badge(true) }, t('vision')),
-            React.createElement('span', {
-              style: { ...styles.badge(m.running), marginLeft: 'auto' },
-            }, m.running ? t('running') : t('notRunning'))),
-          React.createElement('div', { style: { ...styles.hint, ...styles.mono } },
-            `${m.alias} · 端口 ${m.port} · 上下文 ${m.ctxK}K`)))),
+        react.createElement(
+          'div',
+          { key: m.id, style: styles.card },
+          react.createElement(
+            'div',
+            { style: styles.row },
+            react.createElement('span', { style: { fontWeight: 550 } }, m.name),
+            m.vision && react.createElement('span', { style: styles.badge(true) }, t('vision')),
+            react.createElement(
+              'span',
+              { style: { ...styles.badge(m.running), marginLeft: 'auto' } },
+              m.running ? t('running') : t('notRunning'),
+            ),
+          ),
+          react.createElement(
+            'div',
+            { style: { ...styles.hint, ...styles.mono } },
+            `${m.alias} · 端口 ${m.port} · 上下文 ${m.ctxK}K`,
+          ),
+        ),
+      ),
+    ),
 
     state.skipped.length > 0 &&
-      React.createElement('div', { style: { ...styles.hint, color: '#b8791a' } },
+      react.createElement(
+        'div',
+        { style: { ...styles.hint, color: '#b8791a' } },
         t('skipped', { count: state.skipped.length }) +
-        state.skipped.map((s) => `#${s.index} ${s.reason}`).join('；')),
+          state.skipped.map((s) => `#${s.index} ${s.reason}`).join('；'),
+      ),
 
-    message && React.createElement('div', { style: styles.hint }, message),
+    message && react.createElement('div', { style: styles.hint }, message),
     state.lastError &&
-      React.createElement('div', { style: { ...styles.hint, color: '#d13b3b' } }, state.lastError),
+      react.createElement('div', { style: { ...styles.hint, color: '#d13b3b' } }, state.lastError),
   )
 }
 
 /**
- * 客户端入口。
+ * 客户端入口：照官方模式把卡片注册进主设置面板。
  *
- * 把卡片注册进**主设置面板**（设置 → 左侧导航里的一项）。
- *
- * 挂载点用 `settings.section`，而不是 `settings.plugin.item`：
- * 前者是 `kind: 'list'` 的 slot，由 `@deepseek-ai/dsh-client-ui-settings-general`
- * 声明，注册项只需 `name` + `id` + `label`，注册即可见；
- * 后者是 `kind: 'keyed'`，且「插件配置」页会把卡片与宿主服务的设置命名空间
- * **取交集**后才派发，任何一边缺失就永远不显示（这正是此前一直空白的成因）。
- *
- * `slots.inject(名字, 回调)` 是「声明感知」注册：只有当某个父级条目确实
- * 声明了该 slot 时回调才执行。设置页尚未挂载时不会抛错，挂载后会自动执行——
- * 这正好也提供了缺 slot 时的优雅降级。
- *
- * **不注入 locale、不传 inject face**：宿主在渲染 slot 时可能把 ctx 本身
- * 当 props 传下来，组件读 `props.t` 就会打到 Cordis 的 `ctx.t`，抛
- * `cannot get property "t" without inject` 并让整个插件加载失败。
- * 文案因此改为模块内常量，组件不接受任何 props。
- *
- * 整个函数体外包 try/catch：DSH 的 slot API 仍在演进（例如 rc 阶段发生过
- * `id→key` / `order→priority` 重命名），一旦签名变化，这里应退化成
- * console.error 而不是把异常抛进 DSH 加载器、触发红色「插件加载失败」横幅。
- * host 侧的 provider 注册不受影响。
+ * 整个函数体外包 try/catch：DSH 的 slot API 仍在演进，一旦签名变化，
+ * 这里退化成 console.error 而不是把异常抛进 DSH 加载器、触发红色
+ * 「插件加载失败」横幅。host 侧的 provider 注册不受影响。
  */
 export function apply(ctx: {
   slots: {
@@ -331,7 +297,6 @@ export function apply(ctx: {
   }
 }): void {
   try {
-    // 主设置面板的一个 section（左侧导航项 + 右侧内容区）
     ctx.slots.inject('settings.section', () =>
       ctx.slots.register(
         {
