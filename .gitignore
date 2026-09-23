@@ -6,3 +6,9 @@ dist/
 .vscode/
 .idea/
 *.tsbuildinfo
+
+# ÁÙÊ±ÎÄ¼ş
+_msg.txt
+_*.cjs
+_*.mjs
+_*.js
