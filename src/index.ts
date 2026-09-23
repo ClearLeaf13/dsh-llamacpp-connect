@@ -23,6 +23,24 @@ export const name = 'dsh-llamacpp-connect'
 /** 依赖的 DSH 服务；缺任一则不加载，避免半残注册 */
 export const inject = ['llm']
 
+/** host 与 client 之间的状态通道路径 */
+export const STATUS_PATH = '/plugins/dsh-llamacpp-connect/status'
+
+/** 同步触发路径（POST） */
+export const SYNC_PATH = '/plugins/dsh-llamacpp-connect/sync'
+
+/** 路由响应的最小接口 —— 只用到 writeHead/end，避免依赖具体实现 */
+interface RouteResponse {
+  writeHead: (code: number, headers: Record<string, string>) => void
+  end: (body?: string) => void
+}
+
+/** 统一的 JSON 响应写法 */
+function sendJson(res: RouteResponse, code: number, payload: unknown): void {
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' })
+  res.end(JSON.stringify(payload))
+}
+
 /** 插件配置 */
 export interface Config {
   /** 手动指定管理器数据目录；留空则自动探测 */
@@ -197,17 +215,113 @@ export function apply(ctx: Context, config: Config): void {
     return { ok: true, count: state.registrations.size }
   }
 
-  // 把同步能力与状态暴露到 ctx，供客户端配置页调用
-  ctx.set?.('llamacppConnect', {
-    sync,
-    state,
-    /** 供适配器在请求前调用：确保目标模型在运行 */
-    ensureRunning: (model: ManagerModel) => {
-      if (!config.autoStart) return Promise.resolve({ ok: true, started: false })
-      if (!client) return Promise.resolve({ ok: false, started: false, error: '控制客户端未初始化' })
-      return ensureRunning(model, client)
-    },
-  })
+  /**
+   * 供适配器在请求前调用：确保目标模型可服务。
+   *
+   * 用闭包而非挂到 ctx 上 —— Cordis 的上下文是服务容器，
+   * 只有经 provide 声明的 key 才允许赋值，随意挂属性会导致插件加载失败。
+   */
+  const ensureModelReady = (model: ManagerModel) => {
+    if (!config.autoStart) return Promise.resolve({ ok: true, started: false })
+    if (!client) return Promise.resolve({ ok: false, started: false, error: '控制客户端未初始化' })
+    return ensureRunning(model, client)
+  }
+
+  /**
+   * 注册 HTTP 状态路由，供配置页读取数据。
+   *
+   * 这是 host 与 client 之间的数据通道：client 在网页里同源 fetch 这个路径。
+   * 没有 webServer 服务时静默跳过，插件其余功能不受影响。
+   */
+  const webServer = (ctx as unknown as {
+    webServer?: { register?: (r: unknown) => () => void }
+  }).webServer
+
+  if (webServer && typeof webServer.register === 'function') {
+    // 状态查询
+    ctx.effect?.(
+      () => {
+        const dispose = webServer.register!({
+          kind: 'exact',
+          path: STATUS_PATH,
+          handler: async (req: { method?: string }, res: RouteResponse) => {
+            if (req.method && req.method !== 'GET') {
+              return sendJson(res, 405, { ok: false, error: '仅支持 GET' })
+            }
+            sendJson(res, 200, await buildStatusPayload())
+          },
+        })
+        return () => dispose()
+      },
+      'dsh-llamacpp-connect: 状态路由',
+    )
+
+    // 触发同步 —— 配置页的「同步模型」按钮打这里
+    ctx.effect?.(
+      () => {
+        const dispose = webServer.register!({
+          kind: 'exact',
+          path: SYNC_PATH,
+          handler: async (req: { method?: string }, res: RouteResponse) => {
+            if (req.method && req.method !== 'POST') {
+              return sendJson(res, 405, { ok: false, error: '仅支持 POST' })
+            }
+            const r = await sync()
+            sendJson(res, r.ok ? 200 : 500, {
+              ...r,
+              // 同步完顺带回一份最新状态，省掉客户端再取一次
+              state: await buildStatusPayload(),
+            })
+          },
+        })
+        return () => dispose()
+      },
+      'dsh-llamacpp-connect: 同步路由',
+    )
+  }
+
+  /** 组装状态路由的响应体 */
+  const buildStatusPayload = async () => {
+    if (!state.location) {
+      return {
+        ok: false,
+        installed: false,
+        controlApi: false,
+        models: [] as unknown[],
+        skipped: state.skipped,
+        lastError: state.lastError,
+      }
+    }
+
+    // 运行状态来自管理器控制接口；拿不到就退化为「未运行」而不是谎报运行中
+    const runningByPort: Record<number, boolean> = {}
+    if (client?.available) {
+      const st = await client.status()
+      if (st.ok && st.models) {
+        for (const m of st.models) runningByPort[m.port] = m.running
+      }
+    }
+
+    return {
+      ok: true,
+      installed: true,
+      managerDir: state.location.dir,
+      controlApi: state.controlApi,
+      models: state.models.map((m) => ({
+        id: m.id,
+        name: m.name,
+        alias: m.alias,
+        port: m.port,
+        ctxK: m.ctxK,
+        vision: m.vision,
+        running: runningByPort[m.port] ?? false,
+      })),
+      skipped: state.skipped,
+      lastSyncAt: state.lastSyncAt,
+      lastError: state.lastError,
+      statusPath: STATUS_PATH,
+    }
+  }
 
   // 启动时同步一次；失败不抛出，插件加载不应因管理器缺失而失败
   void sync().catch((e) => {

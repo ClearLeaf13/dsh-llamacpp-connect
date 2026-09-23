@@ -2,7 +2,7 @@
   "name": "dsh-llamacpp-connect",
   "displayName": "DSH llama.cpp Connect",
   "description": "把本地 llama.cpp 管理器里的模型接入 DeepSeek Harness — bring local llama.cpp manager models into DeepSeek Harness.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "ClearLeaf13",
   "keywords": [
     "dsh-plugin",
@@ -72,12 +72,24 @@
     "react": "^18.2.0"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": { "optional": true },
-    "@deepseek-ai/dsh-llm": { "optional": true },
-    "@deepseek-ai/dsh-llm-pi-ai": { "optional": true },
-    "@deepseek-ai/dsh-settings": { "optional": true },
-    "@deepseek-ai/schemastery": { "optional": true },
-    "@earendil-works/pi-ai": { "optional": true }
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm-pi-ai": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-settings": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^22.20.0",
