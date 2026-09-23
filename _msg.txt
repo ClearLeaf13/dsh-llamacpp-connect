@@ -1,0 +1,30 @@
+fix: 修复第二个加载失败（cannot get property webServer without inject）
+
+0.1.1 修好了 ctx.set 的坑，但掉进下一个：直接读 ctx.webServer 同样
+是非法的，日志给出了确切错误：
+
+    cannot get property "webServer" without inject
+        at lib/index.js:567
+
+Cordis 的 ctx 是服务容器，服务必须先注入才能访问。正确做法是
+ctx.inject([...], subCtx => ...)，在回调里拿到注入了该服务的子上下文，
+再访问 subCtx.webServer。参考项目 dsh-workbuddy-connect 也是这么写的。
+
+修复
+- 路由注册改包在 ctx.inject(['webServer'], webCtx => ...) 里
+- 顶层 inject 保持只声明 llm：webServer 是可选依赖，放进去会导致
+  宿主缺该服务时整行挂不上；用 inject 回调反而得到优雅降级
+- buildStatusPayload 移到注册之前，避免依赖执行时序
+
+验证（用 DSH 自带的真实 Cordis 容器，两种环境都跑）
+- 有 webServer：加载成功，注册 3 个 provider + 2 个路由
+- 无 webServer：仍加载成功，provider 正常，仅无路由
+- 状态路由实测返回 HTTP 200 与 3 个模型的真实数据
+
+防回归测试扩到 8 项，静态检查（剥掉注释后）：
+- 不得出现 ctx.xxx = value 或 ctx.set()
+- 不得直接读 ctx.webServer，必须经 ctx.inject
+- 顶层 inject 不得含 webServer
+- host 与 client 的路由路径必须一致
+
+60 个测试全部通过。

@@ -228,59 +228,11 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /**
-   * 注册 HTTP 状态路由，供配置页读取数据。
+   * 组装状态路由的响应体。
    *
-   * 这是 host 与 client 之间的数据通道：client 在网页里同源 fetch 这个路径。
-   * 没有 webServer 服务时静默跳过，插件其余功能不受影响。
+   * 定义在 ctx.inject 之前：虽然在柯里化回调里引用也不会出错（回调异步执行），
+   * 但按依赖顺序排列更易读，也避免日后有人把回调改成同步时踩坑。
    */
-  const webServer = (ctx as unknown as {
-    webServer?: { register?: (r: unknown) => () => void }
-  }).webServer
-
-  if (webServer && typeof webServer.register === 'function') {
-    // 状态查询
-    ctx.effect?.(
-      () => {
-        const dispose = webServer.register!({
-          kind: 'exact',
-          path: STATUS_PATH,
-          handler: async (req: { method?: string }, res: RouteResponse) => {
-            if (req.method && req.method !== 'GET') {
-              return sendJson(res, 405, { ok: false, error: '仅支持 GET' })
-            }
-            sendJson(res, 200, await buildStatusPayload())
-          },
-        })
-        return () => dispose()
-      },
-      'dsh-llamacpp-connect: 状态路由',
-    )
-
-    // 触发同步 —— 配置页的「同步模型」按钮打这里
-    ctx.effect?.(
-      () => {
-        const dispose = webServer.register!({
-          kind: 'exact',
-          path: SYNC_PATH,
-          handler: async (req: { method?: string }, res: RouteResponse) => {
-            if (req.method && req.method !== 'POST') {
-              return sendJson(res, 405, { ok: false, error: '仅支持 POST' })
-            }
-            const r = await sync()
-            sendJson(res, r.ok ? 200 : 500, {
-              ...r,
-              // 同步完顺带回一份最新状态，省掉客户端再取一次
-              state: await buildStatusPayload(),
-            })
-          },
-        })
-        return () => dispose()
-      },
-      'dsh-llamacpp-connect: 同步路由',
-    )
-  }
-
-  /** 组装状态路由的响应体 */
   const buildStatusPayload = async () => {
     if (!state.location) {
       return {
@@ -322,6 +274,50 @@ export function apply(ctx: Context, config: Config): void {
       statusPath: STATUS_PATH,
     }
   }
+
+  /**
+   * 注册 HTTP 路由，供配置页读取数据与触发同步。
+   *
+   * host 与 client 之间走同源 HTTP —— client 在网页里 fetch 这些路径。
+   *
+   * 关键：`ctx.webServer` 是**服务**，访问它必须通过 `ctx.inject([...])`
+   * 拿到注入了该服务的子上下文。直接读 `ctx.webServer` 会抛
+   * `cannot get property "webServer" without inject` 并导致插件加载失败。
+   * 用 inject 同时获得优雅降级：宿主没有 webServer 服务时回调不执行，
+   * provider 注册不受影响。
+   */
+  ctx.inject(['webServer'], (webCtx: unknown) => {
+    const server = (webCtx as { webServer: { register: (r: unknown) => () => void } }).webServer
+
+    // 状态查询
+    server.register({
+      kind: 'exact',
+      path: STATUS_PATH,
+      handler: async (req: { method?: string }, res: RouteResponse) => {
+        if (req.method && req.method !== 'GET') {
+          return sendJson(res, 405, { ok: false, error: '仅支持 GET' })
+        }
+        sendJson(res, 200, await buildStatusPayload())
+      },
+    })
+
+    // 触发同步 —— 配置页的「同步模型」按钮打这里
+    server.register({
+      kind: 'exact',
+      path: SYNC_PATH,
+      handler: async (req: { method?: string }, res: RouteResponse) => {
+        if (req.method && req.method !== 'POST') {
+          return sendJson(res, 405, { ok: false, error: '仅支持 POST' })
+        }
+        const r = await sync()
+        sendJson(res, r.ok ? 200 : 500, {
+          ...r,
+          // 同步完顺带回一份最新状态，省掉客户端再取一次
+          state: await buildStatusPayload(),
+        })
+      },
+    })
+  })
 
   // 启动时同步一次；失败不抛出，插件加载不应因管理器缺失而失败
   void sync().catch((e) => {
