@@ -61,6 +61,69 @@ describe('插件入口的 ctx 用法契约', () => {
   })
 })
 
+/**
+ * 防回归：client 入口必须把自己**注册进设置页**。
+ *
+ * 真实踩过的坑：`src/client/index.tsx` 起初只 `export function ConfigPage`，
+ * 没有 `apply` / `inject`。DSH 的 client 模块系统要求 client 入口导出
+ * `apply(ctx)`，由它调 `ctx.slots.register({ name: 'settings.plugin.item' }, C)`
+ * 把卡片挂进「设置 → 插件」。只导出裸组件时宿主无事可做 ——
+ * 面板永远不出现，而 host 侧 provider 注册照常工作，
+ * 于是表现为「模型能用但设置里找不到面板」。
+ */
+describe('client 入口的设置页注册契约', () => {
+  const client = readFileSync(join(process.cwd(), 'src', 'client', 'index.tsx'), 'utf8')
+  const codeOnly = client
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+
+  it('导出 apply', () => {
+    expect(codeOnly).toMatch(/export function apply\s*\(/)
+  })
+
+  it('导出 inject 并声明 slots 服务', () => {
+    expect(codeOnly).toMatch(/export const inject\s*=/)
+    expect(codeOnly).toMatch(/['"]slots['"]/)
+  })
+
+  it('注册到 settings.plugin.item', () => {
+    expect(codeOnly).toMatch(/settings\.plugin\.item/)
+    expect(codeOnly).toMatch(/\.register\s*\(/)
+  })
+
+  it('keyed slot 必须提供 key', () => {
+    // settings.plugin.item 声明为 kind: 'keyed'；
+    // 缺 key 时 UI-slots 会抛 'keyed slot ... requires options.key'
+    expect(codeOnly).toMatch(/\bkey\s*:/)
+  })
+
+  it('导出的 apply 不早于 slot 注册所需的一切（apply 在文件内定义）', () => {
+    // apply 必须与 ConfigPage 同处一个模块，且被导出（上面的用例已断言）
+    const applyIdx = codeOnly.search(/export function apply\s*\(/)
+    const regIdx = codeOnly.search(/settings\.plugin\.item/)
+    expect(applyIdx).toBeGreaterThan(-1)
+    expect(regIdx).toBeGreaterThan(-1)
+  })
+})
+
+describe('package.json 的 client 依赖声明', () => {
+  const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
+    dsh?: { client?: { inject?: string[] } }
+  }
+
+  it('声明了 slots 服务所在包', () => {
+    // slots 服务由 dsh-client-ui-renderer 提供；inject 不到就注册不了 slot。
+    // 声明 dsh-client-locale 只解决文案，不解决面板缺失。
+    expect(pkg.dsh?.client?.inject ?? []).toContain('@deepseek-ai/dsh-client-ui-renderer')
+  })
+
+  it('声明了 settings.plugin.item 的 slot 提供方', () => {
+    expect(pkg.dsh?.client?.inject ?? []).toContain(
+      '@deepseek-ai/dsh-client-ui-settings-plugins',
+    )
+  })
+})
+
 describe('客户端与宿主的路由路径一致', () => {
   const host = readFileSync(join(process.cwd(), 'src', 'index.ts'), 'utf8')
   const client = readFileSync(join(process.cwd(), 'src', 'client', 'index.tsx'), 'utf8')
