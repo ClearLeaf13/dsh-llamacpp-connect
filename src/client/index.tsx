@@ -33,18 +33,19 @@ export const SYNC_PATH = '/plugins/dsh-llamacpp-connect/sync'
  */
 export const SECTION_ID = 'llamacpp-connect'
 
-/** 文案命名空间 */
-const NS = 'settings.llamacpp'
-
 /**
  * 依赖的客户端服务。
  *
- * `slots` 由 `@deepseek-ai/dsh-client-ui-renderer` 提供，是注册面板的前提；
- * `locale` 由 `@deepseek-ai/dsh-client-locale` 提供，用于文案。
- * 这两个包必须同时出现在 package.json 的 `dsh.client.inject` 里，
- * Cordis 才会在本插件的 fiber 启动前把服务准备好。
+ * 只需要 `slots`：面板注册靠它。**不要注入 locale** —— 一旦注入，
+ * 宿主会在 slot 渲染时把 `t` 塞进 kit，而合并顺序里 ownerProps/injected
+ * 可能让组件最终读到 ctx 上的 `t`，触发
+ * `cannot get property "t" without inject` 导致插件加载失败。
+ * 文案改用模块内常量（见下方 `t`），不依赖宿主。
+ *
+ * `slots` 由 `@deepseek-ai/dsh-client-ui-renderer` 提供，必须出现在
+ * package.json 的 `dsh.client.inject` 里，Cordis 才会在 fiber 启动前备好。
  */
-export const inject = ['slots', 'locale']
+export const inject = ['slots']
 
 /** 插件名：client 半的 name 与 host 半一致，供 loader 识别 */
 export const name = 'dsh-llamacpp-connect'
@@ -123,12 +124,19 @@ const en: typeof zh = {
   skipped: 'Skipped {count} invalid entr(ies):',
 }
 
-/** 翻译函数签名；由 apply 从 locale 服务注入 */
+/** 翻译函数签名（保持导出，供将来接回 locale 服务） */
 export type Translate = (key: keyof typeof zh, params?: Record<string, unknown>) => string
 
-/** 兜底翻译：locale 不可用时直接返回中文，保证卡片仍可读 */
-function fallbackT(key: keyof typeof zh, params?: Record<string, unknown>): string {
-  const template = zh[key] ?? key
+/**
+ * 卡片文案：模块内自足，**不依赖宿主注入**。
+ *
+ * 这是刻意的取舍：宿主在 slot 渲染时可能把 ctx 本身当 props 传下来，
+ * 而组件里读 `props.t` 就会打到 Cordis 的 `ctx.t`，抛
+ * `cannot get property "t" without inject` —— 整个插件加载失败。
+ * 因此卡片不从 props 取任何文案，全部用模块内常量。
+ */
+const t: Translate = (key, params) => {
+  const template: string = zh[key] ?? String(key)
   if (!params) return template
   return template.replace(/\{(\w+)\}/g, (_, k: string) => String(params[k] ?? ''))
 }
@@ -164,7 +172,13 @@ const styles = {
   hint: { fontSize: 11, color: '#9a9aa0', lineHeight: 1.7 } as const,
 }
 
-export function ConfigPage({ t = fallbackT }: { t?: Translate } = {}): React.ReactElement {
+/**
+ * 卡片组件。
+ *
+ * **不接受任何 props**：文案用模块内常量，数据走同源 HTTP fetch。
+ * 因此宿主无论传 ctx、传空对象还是不传，都不会触发属性查找。
+ */
+export function ConfigPage(): React.ReactElement {
   const [state, setState] = useState<StatusPayload | null>(null)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
@@ -179,7 +193,7 @@ export function ConfigPage({ t = fallbackT }: { t?: Translate } = {}): React.Rea
       // 宿主路由没注册时也会走到这里（例如 webServer 服务不可用）
       setMessage(t('readError', { reason: (e as Error).message }))
     }
-  }, [t])
+  }, [])
 
   useEffect(() => {
     void refresh()
@@ -207,7 +221,7 @@ export function ConfigPage({ t = fallbackT }: { t?: Translate } = {}): React.Rea
     } finally {
       setBusy(false)
     }
-  }, [t])
+  }, [])
 
   if (message && !state) {
     return React.createElement('div', { style: styles.wrap },
@@ -284,30 +298,23 @@ export function ConfigPage({ t = fallbackT }: { t?: Translate } = {}): React.Rea
  * 声明了该 slot 时回调才执行。设置页尚未挂载时不会抛错，挂载后会自动执行——
  * 这正好也提供了缺 slot 时的优雅降级。
  *
+ * **不注入 locale、不传 inject face**：宿主在渲染 slot 时可能把 ctx 本身
+ * 当 props 传下来，组件读 `props.t` 就会打到 Cordis 的 `ctx.t`，抛
+ * `cannot get property "t" without inject` 并让整个插件加载失败。
+ * 文案因此改为模块内常量，组件不接受任何 props。
+ *
  * 整个函数体外包 try/catch：DSH 的 slot API 仍在演进（例如 rc 阶段发生过
  * `id→key` / `order→priority` 重命名），一旦签名变化，这里应退化成
  * console.error 而不是把异常抛进 DSH 加载器、触发红色「插件加载失败」横幅。
  * host 侧的 provider 注册不受影响。
  */
 export function apply(ctx: {
-  effect: (cb: () => unknown, label?: string) => unknown
-  locale: {
-    register: (ns: string, dicts: Record<string, unknown>) => () => void
-    bind: (ns: string) => Translate
-  }
   slots: {
     inject: (name: string, cb: () => unknown) => unknown
     register: (options: Record<string, unknown>, component: unknown) => () => void
   }
 }): void {
   try {
-    ctx.effect(
-      () => ctx.locale.register(NS, { zh, en }),
-      'dsh-llamacpp-connect: settings copy',
-    )
-
-    const t = ctx.locale.bind(NS)
-
     // 主设置面板的一个 section（左侧导航项 + 右侧内容区）
     ctx.slots.inject('settings.section', () =>
       ctx.slots.register(
@@ -316,8 +323,6 @@ export function apply(ctx: {
           id: SECTION_ID,
           order: 100,
           label: () => t('cardTitle'),
-          locale: NS,
-          inject: () => ({ t }),
         },
         ConfigPage,
       ),

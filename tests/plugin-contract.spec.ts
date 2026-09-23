@@ -108,6 +108,19 @@ describe('client 入口的设置页注册契约', () => {
     expect(codeOnly).not.toMatch(/settings\.plugin\.item/)
   })
 
+  it('不注入 locale、不使用 inject face（防 ctx.t 崩溃）', () => {
+    // 整个客户端入口不得出现 locale 服务或 inject face：
+    // 宿主的 slot 渲染可能把 ctx 当 props 传下来，组件读 props.t 会打到
+    // ctx.t，抛 `cannot get property "t" without inject`，插件加载失败。
+    expect(codeOnly).not.toMatch(/ctx\.locale/)
+    expect(codeOnly).not.toMatch(/\binject\s*:\s*\(\)\s*=>/)
+    expect(codeOnly).not.toMatch(/locale\s*:/)
+  })
+
+  it('卡片组件不接受任何 props', () => {
+    expect(codeOnly).toMatch(/export function ConfigPage\(\)/)
+  })
+
   it('apply 与 slot 注册同处一个模块', () => {
     const applyIdx = codeOnly.search(/export function apply\s*\(/)
     const regIdx = codeOnly.search(/settings\.section/)
