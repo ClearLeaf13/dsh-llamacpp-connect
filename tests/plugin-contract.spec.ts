@@ -324,4 +324,18 @@ describe('client 产物格式（DSH 客户端模块）', () => {
     expect(raw).toContain('var module = { exports: {} }')
     expect(raw).toContain('return module.exports')
   })
+
+  it('react 以裸 require 注入，不经过 __toESM 包装（防 useState 变 null）', () => {
+    // 真实故障：rolldown 对 external 的 CJS 默认导入生成
+    //   let react = require("react"); react = __toESM(react, 1)
+    // __toESM 拿不到具名导出时退回 {}，react.useState 变 undefined，
+    // 渲染期抛 `Cannot read properties of null (reading 'useState')`。
+    // 对齐 dsh-workbuddy-connect：react 由 banner 裸 require 注入，无包装。
+    const raw = readFileSync(clientPath, 'utf8')
+    expect(raw).toMatch(/const react = require\("react"\)/)
+    expect(raw).toMatch(/const react_jsx_runtime = require\("react\/jsx-runtime"\)/)
+    // 绝不能出现把 react 二次包装成 ESM namespace 的 __toESM 调用
+    expect(raw).not.toMatch(/__toESM\(\s*react\b/)
+    expect(raw).not.toMatch(/react = __toESM/)
+  })
 })

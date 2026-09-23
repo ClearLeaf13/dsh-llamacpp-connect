@@ -14,7 +14,23 @@
  * @module dsh-llamacpp-connect/client
  */
 
-import React, { useCallback, useEffect, useState } from 'react'
+/**
+ * react / react/jsx-runtime 由构建 banner 以 `require("react")` / `require("react/jsx-runtime")`
+ * 注入为模块内变量（见 tsdown.config.ts 的 client 面），这里只声明类型、不写 import。
+ *
+ * 为什么不能 `import React from 'react'`：rolldown 对 `external` 的 CJS 默认导入
+ * 会生成 `react = __toESM(require("react"), 1)` 包装。`__toESM` 在 `mod == null`
+ * 或拿不到具名导出时会退回 `{}`，于是 `react.useState` 变成 undefined，
+ * 渲染期抛 `Cannot read properties of null (reading 'useState')`，插件被 safe-mode 禁用。
+ *
+ * 参考 dsh-workbuddy-connect/lib/client.js 的产物头：它是
+ * `let react = require("react")`（无包装）后直接 `react.useState`，本插件照此对齐。
+ */
+declare const react: typeof import('react')
+declare const react_jsx_runtime: typeof import('react/jsx-runtime')
+
+const { useCallback, useEffect, useState } = react
+const React = react
 
 /** 与宿主约定的路径，需与 index.ts 的 STATUS_PATH / SYNC_PATH 保持一致 */
 export const STATUS_PATH = '/plugins/dsh-llamacpp-connect/status'
