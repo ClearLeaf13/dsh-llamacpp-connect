@@ -1,0 +1,6 @@
+# Register the llama.cpp provider family. Each model configured in the local
+# llama.cpp manager becomes its own provider (<id>: <model-id>), so the model
+# picker shows them as separate groups. No default model is changed.
+- insert:
+    - id: llamacpp-connect
+      name: dsh-llamacpp-connect
