@@ -63,6 +63,25 @@ export const Config: z<Config> = z.object({
   autoStart: z.boolean().default(true),
 })
 
+/**
+ * 设置命名空间 —— 这是「设置 → 插件 → 插件配置」面板能显示本卡片的关键。
+ *
+ * DSH 0.1.5 的插件配置页渲染 `settings.plugin.item`（keyed slot），
+ * 每个卡片的 `key` 必须等于一个**宿主实际服务的设置命名空间**；
+ * 两者取交集才显示。所以 host 半必须经 `ctx.settings.installSection()`
+ * 把这个命名空间注册进 settings 服务，client 半的卡片 `key` 再用同一个值。
+ *
+ * 参考 dsh-workbuddy-connect：host 调 installSection(ctx, NS, section, config)，
+ * client 注册 settings.plugin.item 时 key: NS。
+ */
+export const SETTINGS_NS = 'llamacpp'
+
+/** 设置区 schema：与 Config 对应，供 settings.yaml / TUI / 插件配置页读写 */
+const SETTINGS_SECTION = z.object({
+  managerDir: z.string().default(''),
+  autoStart: z.boolean().default(true),
+})
+
 /** 当前已注册的 provider id，用于同步时先撤旧再登新 */
 type Registration = {
   model: ManagerModel
@@ -374,6 +393,44 @@ export function apply(ctx: Context, config: Config): () => void {
   void sync().catch((e) => {
     state.lastError = (e as Error).message
     ctx.logger?.warn?.('dsh-llamacpp-connect: 首次同步失败', e)
+  })
+
+  // 注册设置命名空间：让「设置 → 插件 → 插件配置」面板能显示本卡片。
+  //
+  // 面板取「宿主服务的命名空间」与「注册进 settings.plugin.item 的卡片 key」
+  // 的交集；host 半不 installSection，client 半的卡片就不会被派发。
+  // settings 是可选依赖，缺它时优雅跳过，不影响 provider 注册。
+  ctx.inject(['settings'], (settingsCtx: unknown) => {
+    const settings = (
+      settingsCtx as {
+        settings?: {
+          installSection?: (
+            owner: unknown,
+            ns: string,
+            schema: unknown,
+            entry: unknown,
+            hooks: { setSource: (s: () => Config) => void; onChange: () => void },
+          ) => void
+        }
+      }
+    ).settings
+
+    if (typeof settings?.installSection !== 'function') {
+      ctx.logger?.warn?.(
+        'dsh-llamacpp-connect: host settings service has no installSection; 插件配置页卡片不可用',
+      )
+      return
+    }
+
+    settings.installSection(ctx, SETTINGS_NS, SETTINGS_SECTION, config, {
+      setSource(source) {
+        // settings 服务的源码回填；本插件 config 由 cordis 注入，无需额外处理
+        void source
+      },
+      onChange() {
+        // 配置变化时无需重载 —— 状态路由每次请求都实时读 config
+      },
+    })
   })
 
   // 插件卸载时清理注册，避免残留 provider。

@@ -20,8 +20,16 @@ import React, { useCallback, useEffect, useState } from 'react'
 export const STATUS_PATH = '/plugins/dsh-llamacpp-connect/status'
 export const SYNC_PATH = '/plugins/dsh-llamacpp-connect/sync'
 
-/** 卡片在设置页里的唯一 key（settings.plugin.item 是 keyed slot，必须提供） */
-export const CARD_KEY = 'llamacpp-connect'
+/**
+ * 卡片在设置页里的 key。
+ *
+ * 关键：`settings.plugin.item` 是 **keyed** slot，而 DSH 0.1.5 的
+ * 「设置 → 插件 → 插件配置」面板按「宿主服务的设置命名空间」派发卡片 ——
+ * 每个卡片的 `key` 必须等于 host 半经 `ctx.settings.installSection()`
+ * 注册的命名空间（这里与 src/index.ts 的 SETTINGS_NS 一致，均为 'llamacpp'）。
+ * 两者不一致时面板永远不显示（取交集）。
+ */
+export const CARD_KEY = 'llamacpp'
 
 /** 文案命名空间 */
 const NS = 'settings.llamacpp'
