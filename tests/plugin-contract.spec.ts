@@ -68,10 +68,14 @@ describe('插件入口的 ctx 用法契约', () => {
  *
  * 真实踩过的坑：`src/client/index.tsx` 起初只 `export function ConfigPage`，
  * 没有 `apply` / `inject`。DSH 的 client 模块系统要求 client 入口导出
- * `apply(ctx)`，由它调 `ctx.slots.register({ name: 'settings.plugin.item' }, C)`
- * 把卡片挂进「设置 → 插件」。只导出裸组件时宿主无事可做 ——
+ * `apply(ctx)`，由它注册 slot。只导出裸组件时宿主无事可做 ——
  * 面板永远不出现，而 host 侧 provider 注册照常工作，
  * 于是表现为「模型能用但设置里找不到面板」。
+ *
+ * 挂载点用 `settings.section`（主设置面板的 list slot），而不是
+ * `settings.plugin.item`：后者是 keyed slot，且「插件配置」页会把它与
+ * 宿主服务的设置命名空间**取交集**后才派发，任一侧缺失就永远空白。
+ * `settings.section` 注册即可见，是更稳妥的挂载点。
  */
 describe('client 入口的设置页注册契约', () => {
   const client = readFileSync(join(process.cwd(), 'src', 'client', 'index.tsx'), 'utf8')
@@ -88,21 +92,25 @@ describe('client 入口的设置页注册契约', () => {
     expect(codeOnly).toMatch(/['"]slots['"]/)
   })
 
-  it('注册到 settings.plugin.item', () => {
-    expect(codeOnly).toMatch(/settings\.plugin\.item/)
+  it('注册到主设置面板 settings.section', () => {
+    expect(codeOnly).toMatch(/settings\.section/)
     expect(codeOnly).toMatch(/\.register\s*\(/)
   })
 
-  it('keyed slot 必须提供 key', () => {
-    // settings.plugin.item 声明为 kind: 'keyed'；
-    // 缺 key 时 UI-slots 会抛 'keyed slot ... requires options.key'
-    expect(codeOnly).toMatch(/\bkey\s*:/)
+  it('list slot 必须提供 id 与 label', () => {
+    // settings.section 声明为 kind: 'list'；
+    // 缺 id 时 UI-slots 会抛 'list slot ... requires options.id'
+    expect(codeOnly).toMatch(/\bid\s*:/)
+    expect(codeOnly).toMatch(/\blabel\s*:/)
   })
 
-  it('导出的 apply 不早于 slot 注册所需的一切（apply 在文件内定义）', () => {
-    // apply 必须与 ConfigPage 同处一个模块，且被导出（上面的用例已断言）
+  it('不再注册到 keyed 的 settings.plugin.item（避免命名空间交集过滤）', () => {
+    expect(codeOnly).not.toMatch(/settings\.plugin\.item/)
+  })
+
+  it('apply 与 slot 注册同处一个模块', () => {
     const applyIdx = codeOnly.search(/export function apply\s*\(/)
-    const regIdx = codeOnly.search(/settings\.plugin\.item/)
+    const regIdx = codeOnly.search(/settings\.section/)
     expect(applyIdx).toBeGreaterThan(-1)
     expect(regIdx).toBeGreaterThan(-1)
   })
@@ -119,9 +127,11 @@ describe('package.json 的 client 依赖声明', () => {
     expect(pkg.dsh?.client?.inject ?? []).toContain('@deepseek-ai/dsh-client-ui-renderer')
   })
 
-  it('声明了 settings.plugin.item 的 slot 提供方', () => {
+  it('声明了 settings.section 的 slot 提供方', () => {
+    // settings.section 由 dsh-client-ui-settings-general 声明；
+    // 它同时声明 settings.section 与 settings.general.item 两个 list slot。
     expect(pkg.dsh?.client?.inject ?? []).toContain(
-      '@deepseek-ai/dsh-client-ui-settings-plugins',
+      '@deepseek-ai/dsh-client-ui-settings-general',
     )
   })
 })

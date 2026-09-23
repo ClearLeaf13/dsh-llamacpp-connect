@@ -21,15 +21,17 @@ export const STATUS_PATH = '/plugins/dsh-llamacpp-connect/status'
 export const SYNC_PATH = '/plugins/dsh-llamacpp-connect/sync'
 
 /**
- * 卡片在设置页里的 key。
+ * 卡片在设置面板里的 id。
  *
- * 关键：`settings.plugin.item` 是 **keyed** slot，而 DSH 0.1.5 的
- * 「设置 → 插件 → 插件配置」面板按「宿主服务的设置命名空间」派发卡片 ——
- * 每个卡片的 `key` 必须等于 host 半经 `ctx.settings.installSection()`
- * 注册的命名空间（这里与 src/index.ts 的 SETTINGS_NS 一致，均为 'llamacpp'）。
- * 两者不一致时面板永远不显示（取交集）。
+ * `settings.section` 是 **list** slot（`kind: 'list'`，由
+ * `@deepseek-ai/dsh-client-ui-settings-general` 声明），注册项需要
+ * `name` + `id` + `label`，**不需要** `key`。
+ *
+ * 与 `settings.plugin.item`（keyed，且要求 key 命中宿主服务的设置命名空间、
+ * 取交集才显示）不同，`settings.section` 没有那层过滤：注册即可见，
+ * 因此主设置面板是更稳妥的挂载点。
  */
-export const CARD_KEY = 'llamacpp'
+export const SECTION_ID = 'llamacpp-connect'
 
 /** 文案命名空间 */
 const NS = 'settings.llamacpp'
@@ -270,9 +272,13 @@ export function ConfigPage({ t = fallbackT }: { t?: Translate } = {}): React.Rea
 /**
  * 客户端入口。
  *
- * 把卡片注册进「设置 → 插件」。`settings.plugin.item` 是 **keyed** slot
- * （由 `@deepseek-ai/dsh-client-ui-settings-plugins` 声明为
- * `{ kind: 'keyed', scope: 'root' }`），因此注册时必须提供 `key`。
+ * 把卡片注册进**主设置面板**（设置 → 左侧导航里的一项）。
+ *
+ * 挂载点用 `settings.section`，而不是 `settings.plugin.item`：
+ * 前者是 `kind: 'list'` 的 slot，由 `@deepseek-ai/dsh-client-ui-settings-general`
+ * 声明，注册项只需 `name` + `id` + `label`，注册即可见；
+ * 后者是 `kind: 'keyed'`，且「插件配置」页会把卡片与宿主服务的设置命名空间
+ * **取交集**后才派发，任何一边缺失就永远不显示（这正是此前一直空白的成因）。
  *
  * `slots.inject(名字, 回调)` 是「声明感知」注册：只有当某个父级条目确实
  * 声明了该 slot 时回调才执行。设置页尚未挂载时不会抛错，挂载后会自动执行——
@@ -302,12 +308,15 @@ export function apply(ctx: {
 
     const t = ctx.locale.bind(NS)
 
-    ctx.slots.inject('settings.plugin.item', () =>
+    // 主设置面板的一个 section（左侧导航项 + 右侧内容区）
+    ctx.slots.inject('settings.section', () =>
       ctx.slots.register(
         {
-          name: 'settings.plugin.item',
-          key: CARD_KEY,
-          priority: 30,
+          name: 'settings.section',
+          id: SECTION_ID,
+          order: 100,
+          label: () => t('cardTitle'),
+          locale: NS,
           inject: () => ({ t }),
         },
         ConfigPage,
