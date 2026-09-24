@@ -2,7 +2,7 @@
   "name": "dsh-llamacpp-connect",
   "displayName": "DSH llama.cpp Connect",
   "description": "把本地 llama.cpp 管理器里的模型接入 DeepSeek Harness — bring local llama.cpp manager models into DeepSeek Harness.",
-  "version": "0.13.5",
+  "version": "0.13.6",
   "author": "ClearLeaf13",
   "keywords": [
     "dsh-plugin",
