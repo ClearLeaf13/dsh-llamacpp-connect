@@ -207,14 +207,22 @@ export function apply(ctx: Context, config: Config): () => void {
     // 动态加载 peer（静态 import 在树外产物里可能解析不到）。失败时给出明确
     // 原因，而不是让它冒泡到最外层、只剩一句「首次同步失败 {}」。
     let PiAiAdapter: new (options: unknown) => unknown
+    let createProvider: (spec: unknown) => unknown
+    let openAICompletionsApi: () => unknown
     try {
       ;({ PiAiAdapter } = (await import('@deepseek-ai/dsh-llm-pi-ai')) as unknown as {
         PiAiAdapter: new (options: unknown) => unknown
       })
+      ;({ createProvider } = (await import('@earendil-works/pi-ai')) as unknown as {
+        createProvider: (spec: unknown) => unknown
+      })
+      ;({ openAICompletionsApi } = (
+        await import('@earendil-works/pi-ai/api/openai-completions.lazy')
+      ) as unknown as { openAICompletionsApi: () => unknown })
     } catch (e) {
       const msg =
-        '无法加载 @deepseek-ai/dsh-llm-pi-ai（宿主必须能解析该包，' +
-        `请确认它随 profile 一起安装）：${(e as Error)?.message ?? String(e)}`
+        '无法加载 pi-ai 运行时依赖（@deepseek-ai/dsh-llm-pi-ai、@earendil-works/pi-ai，' +
+        `宿主必须能解析它们，请确认随 profile 一起安装）：${(e as Error)?.message ?? String(e)}`
       state.lastError = msg
       ctx.logger?.error?.(`dsh-llamacpp-connect: ${msg}`)
       return { ok: false, count: 0, error: msg }
@@ -234,13 +242,31 @@ export function apply(ctx: Context, config: Config): () => void {
       try {
         const piModel = toPiModel(model)
 
-        // 每个模型一个 provider：piProvider 的 models 只含它自己
-        const piProvider = {
+        /**
+         * provider 必须用 pi-ai 的 `createProvider()` 构造。
+         *
+         * 手搓 `{ id, name, models, api: 'openai-completions' }` 是不行的：`createProvider`
+         * 返回的是带 `auth / getModels / refreshModels / filterModels / stream / streamSimple`
+         * 的完整 provider，而 `PiAiAdapter` 内部用
+         * `snapshot.models.setProvider(profile.piProvider)` 建模型目录、
+         * `snapshot.models.getModels(provider)` 取模型。
+         *
+         * 手搓对象会被这个目录拒收 —— `adapter.listModels()` 返回**空数组**，
+         * 于是模型选择列表里看不到任何模型（同步本身却是「成功」的）。
+         * 对照实测：手搓 → 0 条；createProvider → 1 条。
+         *
+         * `api` 必须是 `openAICompletionsApi()` 返回的 **Api 对象**，不是协议名字符串。
+         */
+        const piProvider = createProvider({
           id: providerId,
           name: model.name,
+          baseUrl: piModel.baseUrl,
+          auth: {
+            apiKey: { name: '本地 llama.cpp（无需密钥）', resolve: async () => undefined },
+          },
           models: [piModel],
-          api: 'openai-completions',
-        }
+          api: openAICompletionsApi(),
+        })
 
         const profile = {
           provider: providerId,
