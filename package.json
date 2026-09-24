@@ -1,7 +1,7 @@
 {
   "name": "dsh-local-llm-connect",
-  "displayName": "dsh-本地LLM-connect",
-  "description": "把本地 LLM 管理器（llama.cpp / NInfer）里正在运行的模型接入 DeepSeek Harness — bring running local-manager models into DeepSeek Harness.",
+  "displayName": "dsh-鏈湴LLM-connect",
+  "description": "鎶婃湰鍦?LLM 绠＄悊鍣紙llama.cpp / NInfer锛夐噷姝ｅ湪杩愯鐨勬ā鍨嬫帴鍏?DeepSeek Harness 鈥?bring running local-manager models into DeepSeek Harness.",
   "version": "0.13.7",
   "author": "ClearLeaf13",
   "keywords": [
@@ -23,6 +23,7 @@
     "build": "tsdown",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json",
+    "deploy": "node scripts/deploy.mjs",
     "check": "npm run typecheck && npm run test && npm run build"
   },
   "exports": {
@@ -85,9 +86,6 @@
       "optional": true
     },
     "@deepseek-ai/schemastery": {
-      "optional": true
-    },
-    "@earendil-works/pi-ai": {
       "optional": true
     }
   },

@@ -48,6 +48,35 @@ dsh --profile web --dump-config
 
 应能在插件树里看到 `local-llm-connect` 一行。
 
+### 从源码部署（本地开发）
+
+```bash
+npm run build && npm run deploy
+```
+
+`npm run deploy` 会把 `lib` 等产物同步到 `$DSH_HOME/.local-plugins/dsh-local-llm-connect`，
+并**补齐 peer 依赖闭包**，然后真正 import 一次做自检。详见下一节。
+
+> **为什么需要补依赖闭包**
+>
+> 插件在运行时会从自己的目录 `import` 三个包：
+> `@deepseek-ai/dsh-llm-pi-ai`、`@deepseek-ai/dsh-llm`、`@earendil-works/pi-ai`。
+>
+> DSH 用符号链接加载本地插件，Node 会把链接解析到**物理目录**。而宿主提供的兜底钩子
+> `resources/host-module-fallback.mjs` 只接管 `@deepseek-ai/*`（其 `HOST_PACKAGE_PREFIX`
+> 写死了这个前缀），**`@earendil-works/pi-ai` 不在兜底范围内**。
+>
+> `.local-plugins/<name>` 又是产物的一份真实拷贝（不是指向仓库的链接），
+> 因此它既没有自己的 `node_modules`，上层目录也兜不住 `@earendil-works/*`，
+> 运行时就会报：
+>
+> ```
+> Cannot find package '@earendil-works/pi-ai' imported from .../.local-plugins/.../lib/index.js
+> ```
+>
+> 这正是 `npm run deploy` 在插件目录下建 `node_modules` 并链接这几个包的原因。
+> 直接从 npm 安装的版本由包管理器保证依赖齐全，不会遇到这个问题。
+
 ---
 
 ## 使用

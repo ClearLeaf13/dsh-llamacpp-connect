@@ -38,6 +38,34 @@ export const STATUS_PATH = '/plugins/dsh-local-llm-connect/status'
 export const SYNC_PATH = '/plugins/dsh-local-llm-connect/sync'
 
 /**
+ * 运行时必须解析到的 peer 包。
+ *
+ * 前两个由 DSH 的宿主兜底钩子供货（`host-module-fallback.mjs` 以
+ * `@deepseek-ai/` 前缀为限）；`@earendil-works/pi-ai` **不在**兜底范围内，
+ * 必须来自插件自己的解析链。分开列出才能在报错时指出真正的缺失项 ——
+ * 一律报「三个包都失败」会把这条关键差异藏起来。
+ */
+export const REQUIRED_PEERS = [
+  '@deepseek-ai/dsh-llm-pi-ai',
+  '@deepseek-ai/dsh-llm',
+  '@earendil-works/pi-ai',
+] as const
+
+/** 返回第一个无法解析的 peer 包名；全部可解析时返回 undefined。 */
+export const firstUnresolved = async (
+  specifiers: readonly string[],
+): Promise<string | undefined> => {
+  for (const spec of specifiers) {
+    try {
+      await import(spec)
+    } catch {
+      return spec
+    }
+  }
+  return undefined
+}
+
+/**
  * 本插件已注册的路由路径。
  *
  * 放在模块级而非 apply 内部：Cordis 的 HMR `Fiber._reload()` 会重新执行
@@ -405,11 +433,20 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
         ) => unknown
       })
     } catch (e) {
+      // 逐个探测，指名道姓地说清是哪一个没解析到。DSH 的宿主兜底钩子
+      // （host-module-fallback.mjs）只接管 `@deepseek-ai/*`，而
+      // `@earendil-works/pi-ai` 不在其列 —— 必须由本插件自己的目录解析到。
+      // 只报「三个包都失败」会把这条关键差异藏起来，故这里单独区分。
+      const missing = await firstUnresolved(REQUIRED_PEERS)
+      const detail = (e as Error)?.message ?? String(e)
       const msg =
-        '无法加载 pi-ai 运行时依赖（@deepseek-ai/dsh-llm-pi-ai、@deepseek-ai/dsh-llm、' +
-        `@earendil-works/pi-ai，宿主必须能解析它们，请确认随 profile 一起安装）：${
-          (e as Error)?.message ?? String(e)
-        }`
+        missing === undefined
+          ? `无法加载 pi-ai 运行时依赖：${detail}`
+          : `无法加载 pi-ai 运行时依赖：解析不到 ${missing}。` +
+            'DSH 的宿主兜底只补 `@deepseek-ai/*`；`@earendil-works/pi-ai` ' +
+            '必须能被本插件目录解析到 —— 请在插件目录下安装依赖' +
+            '（npm i --omit=dev @earendil-works/pi-ai@^0.85.1），' +
+            `或改用 link 到仓库本体。原始错误：${detail}`
       state.lastError = msg
       ctx.logger?.error?.(`dsh-local-llm-connect: ${msg}`)
       return { ok: false, count: 0, error: msg }
