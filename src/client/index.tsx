@@ -316,4 +316,18 @@ export function apply(ctx: {
   }
 }
 
-export default ConfigPage
+/**
+ * 注意：**绝不能** `export default ConfigPage`。
+ *
+ * cordis-plugin-loader 的 `unwrapExports()` 会做
+ *   exports = exports.default ?? exports
+ * 一旦存在 default 导出，宿主就会把「组件函数」当成「插件本体」，
+ * 客户端 runner 随即按函数式插件处理并调用 `ConfigPage(ctx)` ——
+ * 组件在 **React 渲染上下文之外** 执行，首个 `react.useState()` 抛
+ * `Cannot read properties of null (reading 'useState')`，
+ * 表现为红色的「插件加载失败」横幅。
+ *
+ * 官方 client 包（settings-general / settings-models 等）的产物都只导出
+ * apply / inject / name，没有 default 导出。
+ * 回归测试已锁定这一点（tests/plugin-contract.spec.ts）。
+ */

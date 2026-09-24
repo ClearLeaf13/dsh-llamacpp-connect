@@ -339,4 +339,29 @@ describe('client 产物格式（DSH 客户端模块）', () => {
     expect(raw).not.toMatch(/__toESM\(\s*react\b/)
     expect(raw).not.toMatch(/react = __toESM/)
   })
+
+  it('产物不得带 default 导出（否则组件会被当成插件本体直接调用）', () => {
+    // 真实故障（这个坑耗了最久）：
+    // cordis-plugin-loader 的 unwrapExports() 会执行
+    //   exports = exports.default ?? exports
+    // 一旦 client 产物里有 `exports.default = ConfigPage`，宿主解析出的
+    // 「插件」就是那个组件函数；客户端 runner 见插件是函数便按函数式插件处理，
+    // 直接调用 `ConfigPage(ctx)` —— 组件在 React 渲染上下文之外执行，
+    // 首个 react.useState() 抛
+    //   Cannot read properties of null (reading 'useState')
+    // 表现为启动后的红色「插件加载失败」横幅（且插件被 safe-mode 禁用）。
+    //
+    // 官方 client 包与 dsh-workbuddy-connect 的产物都只导出 apply/inject/name。
+    const raw = readFileSync(clientPath, 'utf8')
+    expect(raw).not.toMatch(/exports\.default\s*=/)
+    // 源码层面同样禁止
+    const clientSource = readFileSync(
+      join(process.cwd(), 'src', 'client', 'index.tsx'),
+      'utf8',
+    )
+    const sourceCodeOnly = clientSource
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '')
+    expect(sourceCodeOnly).not.toMatch(/export\s+default\s/)
+  })
 })
