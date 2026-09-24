@@ -251,7 +251,6 @@ describe('路由注册幂等（扛 HMR reload）', () => {
 
     const fiber = await root.plugin(plugin, {
       managerDir: join(process.cwd(), '__nonexistent__'),
-      autoStart: false,
     })
     const afterFirst = ws.exact.size
     expect(afterFirst, '首次 apply 应注册 2 条路由').toBe(2)

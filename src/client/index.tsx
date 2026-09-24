@@ -66,31 +66,42 @@ export interface StatusPayload {
   installed: boolean
   managerDir?: string
   controlApi: boolean
+  /** **只在运行的**模型 —— 与模型选择列表严格一致 */
   models: ModelRow[]
+  /** 运行中的模型数（= models.length） */
+  runningCount: number
+  /** models.json 里的模型总数 */
+  totalCount: number
   skipped: Array<{ index: number; reason: string }>
   lastSyncAt?: number
   lastError?: string
+  /** host 的自动轮询间隔，用于告诉用户多久会自动更新 */
+  pollIntervalMs?: number
 }
 
 /** 卡片文案：模块内自足，不依赖宿主 locale 注入 */
 const zh = {
   cardTitle: 'llama.cpp Connect',
-  cardDesc: '把本地 llama.cpp 管理器里的模型接入 DeepSeek Harness',
+  cardDesc: '把本地 llama.cpp 管理器里正在运行的模型接入 DeepSeek Harness',
   connected: '已连接管理器',
-  canAutoStart: '可自动启动',
-  syncOnly: '仅同步（无控制接口）',
-  syncBtn: '同步模型',
-  syncing: '同步中…',
+  controlApiOn: '控制接口可用',
+  controlApiOff: '无法获知运行状态',
+  syncBtn: '立即刷新',
+  syncing: '刷新中…',
   retry: '重试',
   recheck: '重新检测',
   loading: '读取中…',
   notInstalled: '未检测到 llama.cpp 管理器。请先安装并运行它，然后在其中配置模型。',
   running: '运行中',
-  notRunning: '未运行',
   vision: '视觉',
-  syncDone: '同步完成，共 {count} 个模型',
-  syncFailed: '同步失败：{reason}',
-  syncError: '同步异常：{reason}',
+  counts: '运行中 {running} / 共 {total} 个模型',
+  noRunning: '当前没有正在运行的模型。',
+  noRunningHint: '在 llama.cpp 管理器里启动模型后，这里和模型选择列表会在约 {seconds} 秒内自动更新。',
+  cannotTell: '无法获知运行状态：管理器未运行，或其版本过低没有控制接口。',
+  cannotTellHint: '启动管理器后会自动恢复；也可以点上面的按钮立即重试。',
+  syncDone: '已更新：运行中 {count} 个模型',
+  syncFailed: '刷新失败：{reason}',
+  syncError: '刷新异常：{reason}',
   readError: '无法读取状态：{reason}',
   unknownReason: '未知原因',
   skipped: '已跳过 {count} 条异常配置：',
@@ -221,18 +232,22 @@ export function ConfigPage(): ReactElement {
     )
   }
 
+  const runningCount = state.runningCount ?? state.models.length
+  const seconds = Math.max(1, Math.round((state.pollIntervalMs ?? 15_000) / 1000))
+  const noneRunning = runningCount === 0
+
   return react.createElement(
     'div',
     { style: styles.wrap },
 
+    // 头部：能否获知运行状态 + 立即刷新
     react.createElement(
       'div',
       { style: styles.row },
-      react.createElement('span', { style: styles.badge(true) }, t('connected')),
       react.createElement(
         'span',
         { style: styles.badge(state.controlApi) },
-        state.controlApi ? t('canAutoStart') : t('syncOnly'),
+        state.controlApi ? t('controlApiOn') : t('controlApiOff'),
       ),
       react.createElement(
         'button',
@@ -244,32 +259,58 @@ export function ConfigPage(): ReactElement {
     state.managerDir &&
       react.createElement('div', { style: { ...styles.hint, ...styles.mono } }, state.managerDir),
 
+    // 计数：让「为什么只有这几个模型」一目了然
     react.createElement(
       'div',
-      { style: { display: 'flex', flexDirection: 'column', gap: 7 } },
-      ...state.models.map((m) =>
+      { style: styles.hint },
+      t('counts', { running: runningCount, total: state.totalCount ?? 0 }),
+    ),
+
+    // 判不了运行状态（管理器没开 / 版本过旧）→ 一个模型也不列
+    !state.controlApi &&
+      react.createElement('div', { style: { ...styles.hint, color: '#b8791a' } }, t('cannotTell')),
+
+    // 没有正在运行的模型
+    noneRunning &&
+      react.createElement(
+        'div',
+        { style: styles.wrap },
+        react.createElement('div', { style: styles.hint }, t('noRunning')),
         react.createElement(
           'div',
-          { key: m.id, style: styles.card },
+          { style: styles.hint },
+          state.controlApi ? t('noRunningHint', { seconds }) : t('cannotTellHint'),
+        ),
+      ),
+
+    // 运行中的模型 —— 与模型选择列表完全一致
+    !noneRunning &&
+      react.createElement(
+        'div',
+        { style: { display: 'flex', flexDirection: 'column', gap: 7 } },
+        ...state.models.map((m) =>
           react.createElement(
             'div',
-            { style: styles.row },
-            react.createElement('span', { style: { fontWeight: 550 } }, m.name),
-            m.vision && react.createElement('span', { style: styles.badge(true) }, t('vision')),
+            { key: m.id, style: styles.card },
             react.createElement(
-              'span',
-              { style: { ...styles.badge(m.running), marginLeft: 'auto' } },
-              m.running ? t('running') : t('notRunning'),
+              'div',
+              { style: styles.row },
+              react.createElement('span', { style: { fontWeight: 550 } }, m.name),
+              m.vision && react.createElement('span', { style: styles.badge(true) }, t('vision')),
+              react.createElement(
+                'span',
+                { style: { ...styles.badge(true), marginLeft: 'auto' } },
+                t('running'),
+              ),
             ),
-          ),
-          react.createElement(
-            'div',
-            { style: { ...styles.hint, ...styles.mono } },
-            `${m.alias} · 端口 ${m.port} · 上下文 ${m.ctxK}K`,
+            react.createElement(
+              'div',
+              { style: { ...styles.hint, ...styles.mono } },
+              `${m.alias} · 端口 ${m.port} · 上下文 ${m.ctxK}K`,
+            ),
           ),
         ),
       ),
-    ),
 
     state.skipped.length > 0 &&
       react.createElement(

@@ -20,7 +20,7 @@ import { readFile } from 'node:fs/promises'
 import { locateManager, type ManagerLocation } from './discovery.js'
 import { parseModels, providerIdFor, type ManagerModel } from './config-store.js'
 import { ControlClient } from './control-client.js'
-import { ensureRunning, toPiModel } from './adapter.js'
+import { toPiModel } from './adapter.js'
 
 export const name = 'dsh-llamacpp-connect'
 
@@ -89,14 +89,19 @@ function sendJson(res: RouteResponse, code: number, payload: unknown): void {
 export interface Config {
   /** 手动指定管理器数据目录；留空则自动探测 */
   managerDir?: string
-  /** 是否在选中未运行模型时自动启动；关闭则只报错 */
-  autoStart: boolean
 }
 
 export const Config: z<Config> = z.object({
   managerDir: z.string().default(''),
-  autoStart: z.boolean().default(true),
 })
+
+/**
+ * 重新评估「哪些模型正在运行」的间隔。
+ *
+ * 模型选择列表只包含运行中的模型，因此运行状态一变列表就要跟上 ——
+ * 15 秒是「启动/停止模型后基本无感」与「不频繁打扰管理器」之间的折中。
+ */
+const POLL_INTERVAL_MS = 15_000
 
 /** 当前已注册的 provider id，用于同步时先撤旧再登新 */
 type Registration = {
@@ -108,7 +113,16 @@ type Registration = {
 /** 插件运行期状态，供状态路由组装响应体 */
 export interface RuntimeState {
   location?: ManagerLocation
+  /**
+   * **正在运行**的模型 —— 与模型选择列表严格一致（未运行的不出现）。
+   *
+   * 数据源是管理器控制接口的 `models[].running`；判定不了时这里是空数组。
+   */
   models: ManagerModel[]
+  /** `models.json` 里的模型总数，用于说明「为什么有些模型不在列表里」 */
+  totalModels: number
+  /** 当前判定为运行的端口集合；`undefined` 表示无法判定 */
+  runningPorts?: Set<number>
   skipped: Array<{ index: number; reason: string }>
   registrations: Map<string, Registration>
   controlApi: boolean
@@ -156,6 +170,7 @@ export async function loadModels(
 export function apply(ctx: Context, config: Config): () => void {
   const state: RuntimeState = {
     models: [],
+    totalModels: 0,
     skipped: [],
     registrations: new Map(),
     controlApi: false,
@@ -176,7 +191,24 @@ export function apply(ctx: Context, config: Config): () => void {
   }
 
   /**
-   * 单次同步的实现：重读管理器配置，重建 provider 注册。
+   * 已注册集合的签名（`provider@端口`，排序后拼接）。
+   *
+   * 用来实现「运行集合没变就跳过重注册」：否则每 15 秒轮询都会拆装一遍适配器，
+   * 正在进行的请求会被打断。签名含端口，所以重配端口也算变化。
+   *
+   * 签名始终由**实际注册成功**的模型算出，而不是期望集合 ——
+   * 某个模型注册失败时两者不同，下一轮轮询就会自动重试。
+   */
+  const signatureOf = (models: ManagerModel[]): string =>
+    models
+      .map((m) => `${providerIdFor(m.id)}@${m.port}`)
+      .sort()
+      .join('|')
+
+  let registeredSignature = ''
+
+  /**
+   * 单次同步的实现：重读管理器配置，按运行状态重建 provider 注册。
    *
    * 先全部撤销再重建，而不是增量 diff —— provider 的模型列表在 DSH 侧
    * 是快照语义，增量更新容易留下已删除模型的残影。
@@ -229,15 +261,51 @@ export function apply(ctx: Context, config: Config): () => void {
     }
 
     state.location = loaded.location
-    state.models = loaded.models
+    state.totalModels = loaded.models.length
     state.skipped = loaded.skipped
-    state.controlApi = Boolean(loaded.location.apiPort && loaded.location.apiToken)
     state.lastError = undefined
     client = new ControlClient(loaded.location)
+    state.controlApi = client.available
+
+    /**
+     * 「正在运行」是模型进入选择列表的**唯一**依据。
+     *
+     * 权威来源是管理器控制接口的 `models[].running`（按端口索引）。
+     * 判定不了时 —— 管理器没运行、版本过旧没有控制接口、或接口无响应 ——
+     * **一个也不列**：宁可列表为空，也不让人选到跑不通的模型。
+     */
+    let ports: Set<number> | undefined
+    if (client.available) {
+      const st = await client.status()
+      if (st.ok && st.models) ports = new Set(st.models.filter((m) => m.running).map((m) => m.port))
+    }
+    state.runningPorts = ports
+
+    if (ports === undefined) {
+      const msg = client.available
+        ? '无法读取管理器运行状态（控制接口无响应），暂时不提供模型'
+        : '无法判定运行状态：管理器未运行，或其版本过低没有控制接口 —— 暂时不提供模型'
+      state.models = []
+      unregisterAll()
+      registeredSignature = ''
+      state.lastError = msg
+      ctx.logger?.warn?.(`dsh-llamacpp-connect: ${msg}`)
+      return { ok: false, count: 0, error: msg }
+    }
+
+    // 只保留正在运行的模型。不写死任何模型 id：以后新增模型自动适用同一条规则。
+    const running = loaded.models.filter((m) => ports.has(m.port))
+    state.models = running
+
+    if (signatureOf(running) === registeredSignature) {
+      // 运行集合没有变化：保持现有注册，避免每轮轮询都打断进行中的请求
+      state.lastSyncAt = Date.now()
+      return { ok: true, count: state.registrations.size }
+    }
 
     unregisterAll()
 
-    for (const model of loaded.models) {
+    for (const model of running) {
       const providerId = providerIdFor(model.id)
       try {
         const piModel = toPiModel(model)
@@ -290,10 +358,14 @@ export function apply(ctx: Context, config: Config): () => void {
       }
     }
 
+    // 用**实际注册成功**的集合回填签名：有注册失败时签名与期望不同，
+    // 下一轮轮询会自动重试，而不会因为「签名已匹配」而永远跳过。
+    registeredSignature = signatureOf([...state.registrations.values()].map((r) => r.model))
+
     state.lastSyncAt = Date.now()
     ctx.logger?.info?.(
-      `dsh-llamacpp-connect: 已同步 ${state.registrations.size} 个模型` +
-        (state.controlApi ? '（控制接口可用）' : '（无控制接口，无法自动启动）'),
+      `dsh-llamacpp-connect: 运行中 ${state.registrations.size} / 共 ${state.totalModels} 个模型` +
+        (state.registrations.size < running.length ? '（部分注册失败）' : ''),
     )
 
     return { ok: true, count: state.registrations.size }
@@ -319,59 +391,36 @@ export function apply(ctx: Context, config: Config): () => void {
   }
 
   /**
-   * 供适配器在请求前调用：确保目标模型可服务。
-   *
-   * 用闭包而非挂到 ctx 上 —— Cordis 的上下文是服务容器，
-   * 只有经 provide 声明的 key 才允许赋值，随意挂属性会导致插件加载失败。
-   */
-  const ensureModelReady = (model: ManagerModel) => {
-    if (!config.autoStart) return Promise.resolve({ ok: true, started: false })
-    if (!client) return Promise.resolve({ ok: false, started: false, error: '控制客户端未初始化' })
-    return ensureRunning(model, client)
-  }
-
-  /**
    * 组装状态路由的响应体。
+   *
+   * 数据全部取自 `state`，不在这里额外请求管理器 —— 卡片显示的模型集合必须与
+   * 模型选择列表**完全一致**（都来自最近一次运行状态评估）。运行状态由轮询刷新，
+   * 或由「同步模型」按钮立即刷新。
    */
   const buildStatusPayload = async () => {
-    if (!state.location) {
-      return {
-        ok: false,
-        installed: false,
-        controlApi: false,
-        models: [] as unknown[],
-        skipped: state.skipped,
-        lastError: state.lastError,
-      }
-    }
-
-    // 运行状态来自管理器控制接口；拿不到就退化为「未运行」而不是谎报运行中
-    const runningByPort: Record<number, boolean> = {}
-    if (client?.available) {
-      const st = await client.status()
-      if (st.ok && st.models) {
-        for (const m of st.models) runningByPort[m.port] = m.running
-      }
-    }
-
+    const running = state.models
     return {
-      ok: true,
-      installed: true,
-      managerDir: state.location.dir,
+      ok: Boolean(state.location),
+      installed: Boolean(state.location),
+      managerDir: state.location?.dir,
       controlApi: state.controlApi,
-      models: state.models.map((m) => ({
+      // 只有运行中的模型（`running` 恒为 true —— 未运行的压根不在这个列表里）
+      models: running.map((m) => ({
         id: m.id,
         name: m.name,
         alias: m.alias,
         port: m.port,
         ctxK: m.ctxK,
         vision: m.vision,
-        running: runningByPort[m.port] ?? false,
+        running: true,
       })),
+      runningCount: running.length,
+      totalCount: state.totalModels,
       skipped: state.skipped,
       lastSyncAt: state.lastSyncAt,
       lastError: state.lastError,
       statusPath: STATUS_PATH,
+      pollIntervalMs: POLL_INTERVAL_MS,
     }
   }
 
@@ -493,7 +542,29 @@ export function apply(ctx: Context, config: Config): () => void {
     )
   })
 
-  // 插件卸载时清理注册，避免残留 provider。
+  /**
+   * 定期重新评估运行状态：你在管理器里启动/停止模型后，模型选择列表会自动跟上，
+   * 不需要手动点同步。
+   *
+   * 用自建 timer 而非 `ctx.setInterval` —— HMR 重载时 ctx 可能已经失效，
+   * `ctx.setInterval` 会抛 `cannot create effect on inactive context`；
+   * 自建 timer 在返回的 disposer 里显式清理，跨代际是安全的。
+   *
+   * 轮询走的就是那条串行队列，因此不会与「同步模型」按钮、启动同步互相交错。
+   */
+  const pollTimer = setInterval(() => {
+    void sync().catch((e) => {
+      // 轮询失败只记日志：管理器暂时不可达不该影响插件继续提供服务
+      ctx.logger?.warn?.(
+        `dsh-llamacpp-connect: 轮询失败: ${(e as Error)?.message ?? String(e)}`,
+      )
+    })
+  }, POLL_INTERVAL_MS)
+
+  // 别让一个轮询定时器拖住宿主进程退出
+  ;(pollTimer as unknown as { unref?: () => void }).unref?.()
+
+  // 插件卸载时清理注册与定时器，避免残留 provider 和后台轮询。
   //
   // 这里**返回** disposer 而不是调 ctx.effect：HMR `Fiber._reload()` 重跑
   // `apply` 时，外层 ctx 对应的 fiber 已失效，`ctx.effect` 会抛
@@ -501,6 +572,7 @@ export function apply(ctx: Context, config: Config): () => void {
   // Cordis 的 runner 直接收集（cordis/lib/index.js:1140/1068），
   // 不经过 fiber 活跃性检查，重跑时同样能正确登记。
   return () => {
+    clearInterval(pollTimer)
     // 只有自己仍是「当前代」时才清空 live，避免把后来者的代一起清掉。
     // 清空后路由处理器会明确返回 503，而不是访问已失效的 ctx。
     if (live?.sync === sync) live = undefined
