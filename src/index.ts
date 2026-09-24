@@ -167,7 +167,28 @@ export async function loadModels(
   return { ok: true, location, models, skipped }
 }
 
-export function apply(ctx: Context, config: Config): () => void {
+/**
+ * 插件入口。
+ *
+ * **必须是箭头函数，不能写成 `export function apply(...)`。**
+ *
+ * cordis 用 `isConstructor(callback)` 区分「类式插件」和「函数式插件」：
+ *
+ *   function isConstructor(func) {
+ *     if (!func.prototype) return false   // 箭头函数没有 prototype
+ *     return true                          // 普通函数有
+ *   }
+ *
+ * 普通函数会被判定为构造函数，于是 cordis 执行 `new callback(ctx, config)`，
+ * 并且只收集 `instance[symbols.init]()` —— **本函数 return 出去的 disposer
+ * 会被直接丢弃**。副作用照常发生，所以功能看起来正常，但插件卸载时永远不做
+ * 清理：轮询定时器泄漏、适配器不会被撤销（已停掉的模型可能残留在模型选择里）。
+ *
+ * 箭头函数没有 prototype，cordis 会走 `callback(ctx, config)` 分支，并把返回值
+ * `collect` 成 disposer（cordis/lib/index.js:1136-1142）。
+ * 回归测试锁定了这一点（`apply.prototype === undefined`）。
+ */
+export const apply = (ctx: Context, config: Config): (() => void) => {
   const state: RuntimeState = {
     models: [],
     totalModels: 0,

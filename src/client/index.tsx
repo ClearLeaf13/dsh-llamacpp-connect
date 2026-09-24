@@ -329,16 +329,21 @@ export function ConfigPage(): ReactElement {
 /**
  * 客户端入口：照官方模式把卡片注册进主设置面板。
  *
+ * **写成箭头函数**（同 host 半的原因）：cordis 用 `isConstructor()` 判断插件形态，
+ * 普通函数有 `prototype`，会被当成类式插件用 `new` 调用，返回值不再被收集为
+ * disposer。客户端 runner 目前用箭头包了一层，所以这里暂时不会出问题，
+ * 但按契约保持不可构造，避免依赖那一层的实现细节。
+ *
  * 整个函数体外包 try/catch：DSH 的 slot API 仍在演进，一旦签名变化，
  * 这里退化成 console.error 而不是把异常抛进 DSH 加载器、触发红色
  * 「插件加载失败」横幅。host 侧的 provider 注册不受影响。
  */
-export function apply(ctx: {
+export const apply = (ctx: {
   slots: {
     inject: (name: string, cb: () => unknown) => unknown
     register: (options: Record<string, unknown>, component: unknown) => () => void
   }
-}): void {
+}): void => {
   try {
     ctx.slots.inject('settings.section', () =>
       ctx.slots.register(

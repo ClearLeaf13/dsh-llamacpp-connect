@@ -83,8 +83,12 @@ describe('client 入口的设置页注册契约', () => {
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '')
 
-  it('导出 apply', () => {
-    expect(codeOnly).toMatch(/export function apply\s*\(/)
+  it('导出 apply，且必须是箭头函数（不可构造）', () => {
+    // cordis 用 isConstructor() 判断插件形态：普通函数有 prototype，会被当成
+    // 类式插件用 `new callback(ctx, config)` 调用，返回值不再被收集为 disposer。
+    // 因此 apply 必须是箭头函数。
+    expect(codeOnly).toMatch(/export const apply\s*=\s*\(/)
+    expect(codeOnly).not.toMatch(/export function apply\s*\(/)
   })
 
   it('导出 inject 并声明 slots 服务', () => {
@@ -122,7 +126,7 @@ describe('client 入口的设置页注册契约', () => {
   })
 
   it('apply 与 slot 注册同处一个模块', () => {
-    const applyIdx = codeOnly.search(/export function apply\s*\(/)
+    const applyIdx = codeOnly.search(/export const apply\s*=\s*\(/)
     const regIdx = codeOnly.search(/settings\.section/)
     expect(applyIdx).toBeGreaterThan(-1)
     expect(regIdx).toBeGreaterThan(-1)
@@ -452,5 +456,78 @@ describe('host 半的热重载健壮性契约', () => {
     const unregisterAt = body.indexOf('unregisterAll()', importAt)
     expect(importAt, 'runSync 里应有动态 import').toBeGreaterThan(-1)
     expect(unregisterAt, 'import 之后才撤销旧注册').toBeGreaterThan(importAt)
+  })
+})
+
+/**
+ * 防回归：插件入口必须「不可构造」。
+ *
+ * cordis 这样区分插件形态（cordis/lib/index.js:1065-1071）：
+ *
+ *   function isConstructor(func) {
+ *     if (!func.prototype) return false   // 箭头函数
+ *     return true                          // 普通函数（含 function 声明）
+ *   }
+ *   if (isConstructor(callback)) {
+ *     const instance = new callback(ctx, config)   // ← 用 new 调用
+ *     return instance?.[symbols.init]?.()          // ← 返回值被丢弃
+ *   }
+ *   return callback(ctx, config)                   // ← 返回值才被 collect 成 disposer
+ *
+ * 所以 `export function apply(...)` 会让 disposer 永远不被收集：插件卸载时
+ * 轮询定时器泄漏、适配器不被撤销。副作用照常发生，功能看起来正常 ——
+ * 这正是它藏得深的原因。这两条直接检查**构建产物**里的 apply。
+ */
+describe('插件入口不可构造（disposer 才会被收集）', () => {
+  it('host 产物的 apply 没有 prototype', async () => {
+    const mod = (await import(
+      'file://' + join(process.cwd(), 'lib', 'index.js').replace(/\\/g, '/')
+    )) as { apply?: { prototype?: unknown } }
+    expect(typeof mod.apply, 'host 必须导出 apply').toBe('function')
+    expect(mod.apply?.prototype, 'host apply 必须是箭头函数').toBeUndefined()
+  })
+
+  it('client 产物的 apply 没有 prototype', async () => {
+    const { readFileSync } = await import('node:fs')
+    const vm = await import('node:vm')
+    const raw = readFileSync(join(process.cwd(), 'lib', 'client', 'index.js'), 'utf8')
+
+    const factories = new Map<string, (req: (s: string) => unknown) => Record<string, unknown>>()
+    const sandbox = {
+      window: {
+        __ModuleLoader__: {
+          load: (r: { id: string; factory: (req: (s: string) => unknown) => Record<string, unknown> }) =>
+            factories.set(r.id, r.factory),
+        },
+      },
+      console,
+      Symbol,
+      Object,
+      Reflect,
+      JSON,
+      Map,
+      Set,
+      Promise,
+      Error,
+    }
+    ;(sandbox as Record<string, unknown>).globalThis = sandbox
+    vm.createContext(sandbox)
+    vm.runInContext(raw, sandbox, { filename: 'client.js' })
+
+    const factory = factories.get('dsh-llamacpp-connect')
+    expect(factory, 'client 产物应登记 factory').toBeDefined()
+
+    const reactStub = {
+      useState: (init: unknown) => [init, () => {}],
+      useCallback: (fn: unknown) => fn,
+      useEffect: () => {},
+      createElement: () => ({}),
+    }
+    const exported = factory!((spec: string) =>
+      spec === 'react' ? reactStub : { jsx: () => ({}), jsxs: () => ({}) },
+    )
+
+    expect(typeof exported.apply, 'client 必须导出 apply').toBe('function')
+    expect((exported.apply as { prototype?: unknown }).prototype, 'client apply 必须是箭头函数').toBeUndefined()
   })
 })

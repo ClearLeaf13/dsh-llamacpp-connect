@@ -150,8 +150,10 @@ type Harness = {
   /** 每次 registerAdapter 的 provider id */
   registered: string[]
   status: () => Promise<RouteReply>
+  /** 状态路由的 HTTP 状态码（卸载后应为 503） */
+  statusCode: () => Promise<number>
   sync: () => Promise<RouteReply>
-  dispose: () => void
+  dispose: () => Promise<void>
 }
 
 async function boot(managerDir: string): Promise<Harness> {
@@ -178,22 +180,26 @@ async function boot(managerDir: string): Promise<Harness> {
   const fiber = (await root.plugin(
     { name: mod.name, inject: mod.inject, Config: mod.Config, apply: mod.apply },
     { managerDir },
-  )) as { dispose?: () => void }
+  )) as { dispose?: () => unknown }
 
-  const callRoute = async (path: string, method: string): Promise<RouteReply> => {
+  const callRouteRaw = async (
+    path: string,
+    method: string,
+  ): Promise<{ code: number; body: RouteReply }> => {
     const route = ws.routes.get(path)
     if (!route) throw new Error(`路由未注册：${path}`)
     const { res, out } = makeRes()
     await route.handler({ method }, res)
-    return JSON.parse(out.body) as RouteReply
+    return { code: out.code, body: JSON.parse(out.body) as RouteReply }
   }
 
   return {
     registered,
-    status: () => callRoute(STATUS_PATH, 'GET'),
-    sync: () => callRoute(SYNC_PATH, 'POST'),
-    dispose: () => {
-      fiber.dispose?.()
+    status: async () => (await callRouteRaw(STATUS_PATH, 'GET')).body,
+    statusCode: async () => (await callRouteRaw(STATUS_PATH, 'GET')).code,
+    sync: async () => (await callRouteRaw(SYNC_PATH, 'POST')).body,
+    dispose: async () => {
+      await fiber.dispose?.()
     },
   }
 }
@@ -293,5 +299,31 @@ describe('模型集合由「正在运行」决定', () => {
     expect(st.models).toEqual([])
     expect(st.runningCount).toBe(0)
     expect(String(st.lastError ?? '')).toMatch(/运行状态|控制接口/)
+  })
+
+  it('卸载插件时 disposer 被调用（否则轮询与注册都会泄漏）', async () => {
+    // 真实故障：`export function apply(...)` 有 prototype，被 cordis 的
+    // isConstructor() 判定为类式插件，于是用 `new apply(ctx, config)` 调用，
+    // **返回值不再被收集为 disposer**。副作用照常发生，所以功能看起来正常，
+    // 但插件卸载时永远不做清理。
+    // 这里用「卸载后路由必须降级为 503」来证明 disposer 真的执行了。
+    const manager = await startManager(['balanced'])
+    cleanup.push(() => manager.close())
+    const dir = await writeManagerDir(manager.port)
+    cleanup.push(() => rm(dir, { recursive: true, force: true }))
+
+    const h = await boot(dir)
+    await waitFor(() => h.registered.length === 1, '首次同步')
+    expect(await h.statusCode(), '卸载前应正常服务').toBe(200)
+
+    await h.dispose()
+
+    // cordis 的 fiber 清理是异步链（_unload 的 inertia），轮询等待收敛
+    let code = await h.statusCode()
+    for (let i = 0; i < 40 && code !== 503; i++) {
+      await new Promise((r) => setTimeout(r, 25))
+      code = await h.statusCode()
+    }
+    expect(code, '卸载后 disposer 必须执行并把路由降级为 503').toBe(503)
   })
 })
