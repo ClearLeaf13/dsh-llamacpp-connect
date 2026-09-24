@@ -12,3 +12,7 @@ _msg.txt
 _*.cjs
 _*.mjs
 _*.js
+
+# 发布产物（走 Release，不进 git）
+*.tgz
+*.zip
