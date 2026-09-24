@@ -180,6 +180,8 @@ pnpm run check   # typecheck + test + build
 3. `adapter.listModels()` 能返回模型（模型选择列表的数据源；只注册成功但枚举为空是曾经的真实故障）
 4. 插件的 `apply` 是**箭头函数**。普通函数有 `prototype`，会被 cordis 的 `isConstructor()` 当成类式插件用 `new callback(ctx, config)` 调用，**返回值不再被收集为 disposer** —— 副作用照常发生所以看起来正常，但卸载时轮询定时器泄漏、适配器不被撤销。
 5. 手搓的 pi-ai **profile 自带官方归一化的字段**。我们绕过了 `dsh-llm-pi-ai` 的 `resolveProfiles()`（未导出），而 stream 路径**直接读取**这些字段：`streamIdleTimeoutMs`（缺失即抛 `idleWatchdog timeoutMs must be a positive finite number...`）、`maxRequestImageBytes` / `requestImagePixelBudget` / `requestImageMaxBytes`、`retryPolicy`。见 `buildAdapterProfile()` 的注释。
+6. provider 的 auth 用官方 `harnessApiKeyAuth` 的**嵌套形状** `{ apiKey: { name, resolve } }`，且 `resolve` **必须返回对象**（无凭据时返回 `{ auth: {} }`）。少嵌一层、或返回 `undefined`，pi-ai 的 `applyAuth()` 都会判为未配置，在请求发出前抛 `Provider is not configured: <provider>`。见 `keylessApiKeyAuth()` 的注释。
+7. 端到端测试（`tests/stream-e2e.spec.ts`）会真的发一次 stream。注意 **pi-ai 把失败作为「流片段」返回而不是抛出** —— 只断言「有没有抛错」会漏判，必须检查片段内容。
 
 ---
 

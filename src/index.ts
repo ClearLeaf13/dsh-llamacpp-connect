@@ -179,6 +179,51 @@ const DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET = 4 * 1024 * 1024
 const DEFAULT_REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
 
 /**
+ * 「无需密钥」provider 的 auth 声明。
+ *
+ * 逐字复刻 `dsh-llm-pi-ai` 内部的 `harnessApiKeyAuth()` —— 该函数**没有导出**
+ * （它的导出只有 `Config / PiAiAdapter / apply / inject / name / recordKeyFor /
+ * supportedProtocols`），所以只能照抄形状：
+ *
+ *   resolve: ({ credential }) => Promise.resolve({
+ *     auth: credential?.key === undefined ? {} : { apiKey: credential.key },
+ *     source: name,
+ *   })
+ *
+ * **关键：`resolve` 必须返回一个对象，绝不能返回 `undefined`。**
+ * pi-ai 的 `Models.applyAuth()`（@earendil-works/pi-ai/dist/models.js:358-367）
+ * 只判断解析结果是否为真值：
+ *
+ *   const resolution = await this.getAuth(model, {...})
+ *   if (!resolution) throw new ModelsError('auth', `Provider is not configured: ${model.provider}`)
+ *
+ * 我们原先写的是 `resolve: async () => undefined`，于是**请求一发出就**抛
+ * `Provider is not configured: <provider>`（请求根本没到上游）。
+ * 官方形状在「没有凭据」时返回 `{ auth: {} }`，依然通过这道判断 ——
+ * 本地 llama.cpp 不需要密钥，空 auth 正合适。
+ *
+ * **用法必须嵌在 `auth.apiKey` 下**（官方 `routeAuth()` 即
+ * `{ apiKey: harnessApiKeyAuth(name) }`）。`resolveProviderAuth()` 的第一条分支
+ * 判的是 `provider.auth.apiKey` 是否存在 —— 少嵌这一层，它就成了 `undefined`，
+ * 于是既不解析覆盖的 key、也拿不到环境凭据，最终仍抛 `Provider is not configured`。
+ */
+export function keylessApiKeyAuth(name: string): {
+  name: string
+  resolve: (context: {
+    credential?: { key?: string }
+  }) => Promise<{ auth: { apiKey?: string }; source: string }>
+} {
+  return {
+    name,
+    resolve: ({ credential }) =>
+      Promise.resolve({
+        auth: credential?.key === undefined ? {} : { apiKey: credential.key },
+        source: name,
+      }),
+  }
+}
+
+/**
  * 构造一个 pi-ai **profile**。
  *
  * 我们是**手搓 profile** 直接交给 `PiAiAdapter({ profiles })`，因此绕过了
@@ -407,9 +452,11 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
           id: providerId,
           name: model.name,
           baseUrl: piModel.baseUrl,
-          auth: {
-            apiKey: { name: '本地 llama.cpp（无需密钥）', resolve: async () => undefined },
-          },
+          // 必须是官方 harnessApiKeyAuth 的形状 —— 注意**要嵌在 apiKey 键下**
+          // （官方 routeAuth() 就是 `{ apiKey: harnessApiKeyAuth(name) }`）。
+          // 直接把它当 auth 会让 provider.auth.apiKey 为 undefined，
+          // pi-ai 的 applyAuth() 随即抛 `Provider is not configured: <provider>`。
+          auth: { apiKey: keylessApiKeyAuth(model.name) },
           models: [piModel],
           api: openAICompletionsApi(),
         })
