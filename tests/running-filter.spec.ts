@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
@@ -22,19 +22,55 @@ const PLUGIN_URL = 'file://' + LIB.replace(/\\/g, '/')
 const STATUS_PATH = '/plugins/dsh-llamacpp-connect/status'
 const SYNC_PATH = '/plugins/dsh-llamacpp-connect/sync'
 
-/** 两个模型：balanced（8080）与 vl（8081） */
-const MODELS = [
-  { id: 'balanced', name: 'Qwen 35B', alias: 'Qwen-35B', port: 8080, ctxK: 32, vision: false },
-  {
-    id: 'vl',
-    name: 'Qwen VL',
-    alias: 'Qwen-VL',
-    port: 8081,
-    ctxK: 64,
-    mmproj: 'mm.gguf',
-    vision: true,
-  },
-]
+type FixtureModel = {
+  id: string
+  name: string
+  alias: string
+  port: number
+  ctxK: number
+  vision: boolean
+  mmproj?: string
+}
+
+/**
+ * 两个模型，端口**每次测试现取一个保证空闲的端口**。
+ *
+ * 这点很重要：模型端口就是 provider 的上游地址。取空闲端口才能保证
+ * 「上游必定连不上」，从而让 stream 类断言确定性成立
+ * （写死 8080 时，机器上恰好有服务在听就会让测试悄悄变成另一种结果）。
+ */
+let MODELS: FixtureModel[] = []
+
+/** 拿一个当前空闲的端口 */
+async function freePort(): Promise<number> {
+  const srv = createServer()
+  await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', () => resolve()))
+  const port = (srv.address() as AddressInfo).port
+  await new Promise<void>((resolve) => srv.close(() => resolve()))
+  return port
+}
+
+beforeEach(async () => {
+  MODELS = [
+    {
+      id: 'balanced',
+      name: 'Qwen 35B',
+      alias: 'Qwen-35B',
+      port: await freePort(),
+      ctxK: 32,
+      vision: false,
+    },
+    {
+      id: 'vl',
+      name: 'Qwen VL',
+      alias: 'Qwen-VL',
+      port: await freePort(),
+      ctxK: 64,
+      mmproj: 'mm.gguf',
+      vision: true,
+    },
+  ]
+})
 
 type Manager = {
   port: number
@@ -149,6 +185,8 @@ async function waitFor(cond: () => boolean, label: string, timeoutMs = 4000): Pr
 type Harness = {
   /** 每次 registerAdapter 的 provider id */
   registered: string[]
+  /** 捕获到的适配器（与 registered 一一对应），用于直接驱动 stream 路径 */
+  adapters: Array<{ listModels: (p: string) => Promise<Array<{ id: string }>>; stream: (o: unknown) => AsyncGenerator<unknown> }>
   status: () => Promise<RouteReply>
   /** 状态路由的 HTTP 状态码（卸载后应为 503） */
   statusCode: () => Promise<number>
@@ -161,11 +199,13 @@ async function boot(managerDir: string): Promise<Harness> {
   const root = new Context()
   const ws = makeWebServer()
   const registered: string[] = []
+  const adapters: Harness['adapters'] = []
 
   root.provide('webServer', ws)
   root.provide('llm', {
-    registerAdapter: (ids: string[]) => {
+    registerAdapter: (ids: string[], adapter: Harness['adapters'][number]) => {
       registered.push(ids[0]!)
+      adapters.push(adapter)
       return () => {}
     },
   })
@@ -195,6 +235,7 @@ async function boot(managerDir: string): Promise<Harness> {
 
   return {
     registered,
+    adapters,
     status: async () => (await callRouteRaw(STATUS_PATH, 'GET')).body,
     statusCode: async () => (await callRouteRaw(STATUS_PATH, 'GET')).code,
     sync: async () => (await callRouteRaw(SYNC_PATH, 'POST')).body,
@@ -325,5 +366,46 @@ describe('模型集合由「正在运行」决定', () => {
       code = await h.statusCode()
     }
     expect(code, '卸载后 disposer 必须执行并把路由降级为 503').toBe(503)
+  })
+
+  it('注册的适配器 profile 自带 streamIdleTimeoutMs（stream 不抛 idleWatchdog）', async () => {
+    // 真实故障：手搓 profile 绕过了 dsh-llm-pi-ai 的 resolveProfiles() 归一化，
+    // 缺 streamIdleTimeoutMs → stream 一开就抛
+    //   idleWatchdog timeoutMs must be a positive finite number no greater than 2147483647
+    // 这里真的去驱动 stream（该字段在 streamWithSnapshot 的第 6 步被读取），
+    // 断言错误里**不再**出现 idleWatchdog —— 上游连不上是另一回事，不算这次的问题。
+    const manager = await startManager(['balanced'])
+    cleanup.push(() => manager.close())
+    const dir = await writeManagerDir(manager.port)
+    cleanup.push(() => rm(dir, { recursive: true, force: true }))
+
+    const h = await boot(dir)
+    await waitFor(() => h.registered.length === 1, '首次同步')
+
+    const provider = 'llamacpp-balanced'
+    const adapter = h.adapters[0]!
+    const models = await adapter.listModels(provider)
+    expect(models.length, '适配器应能列出模型').toBeGreaterThan(0)
+
+    // 把流**抽干**：只调一次 next() 只会拿到起始事件，走不到网络层，
+    // 那样断言就是空转。上游端口是刚取的空闲端口，必定连不上，
+    // 所以这里必然会以一个错误结束 —— 而那个错误绝不能是 idleWatchdog。
+    let caught: unknown
+    try {
+      for await (const _chunk of adapter.stream({
+        provider,
+        model: models[0]!.id,
+        messages: [],
+      })) {
+        // 不关心内容，只关心它是否能越过 idleWatchdog 走到上游
+      }
+    } catch (e) {
+      caught = e
+    }
+
+    expect(
+      String((caught as Error | undefined)?.message ?? ''),
+      'stream 不得因 profile.streamIdleTimeoutMs 无效而抛 idleWatchdog',
+    ).not.toMatch(/idleWatchdog/)
   })
 })

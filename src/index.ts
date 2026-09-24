@@ -168,6 +168,57 @@ export async function loadModels(
 }
 
 /**
+ * 与 `dsh-llm-pi-ai` 官方归一化一致的默认值。
+ *
+ * 出处：该包 profile schema 的 `.default(...)`，以及 `resolveProfiles()` 里的
+ * `?? 3e5` / `?? 20971520` / `?? 4194304` / `?? 1048576`。
+ */
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
+const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 20 * 1024 * 1024
+const DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET = 4 * 1024 * 1024
+const DEFAULT_REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
+
+/**
+ * 构造一个 pi-ai **profile**。
+ *
+ * 我们是**手搓 profile** 直接交给 `PiAiAdapter({ profiles })`，因此绕过了
+ * `dsh-llm-pi-ai` 的 `resolveProfiles()` 归一化（它没有导出，无法复用）。
+ * 而 stream 路径会**直接读取**下列字段、没有兜底：
+ *
+ * | 字段 | 读取处 | 缺失后果 |
+ * |---|---|---|
+ * | `streamIdleTimeoutMs` | `dsh-llm-pi-ai:1865` → `idleWatchdog()` | 抛 `idleWatchdog timeoutMs must be a positive finite number no greater than 2147483647` |
+ * | `maxRequestImageBytes` / `requestImagePixelBudget` / `requestImageMaxBytes` | `:1885-1888` 图片策略 | 图片处理拿到 `undefined` |
+ * | `retryPolicy` | `:2567` `registrationFacts()` | 注册信息缺重试策略 |
+ *
+ * 其余字段（`thinkingBudgets` / `cacheRetention` / `transport` / `timeoutMs` …）
+ * 在 `profileOptions()` 里都有 `=== void 0` 兜底，可以不传。
+ *
+ * @param options.resolveRetryPolicy - 从 `@deepseek-ai/dsh-llm` 动态引入的归一化函数
+ *   （`dsh-llm-pi-ai` 用它把 `undefined` 归一成一个合法的默认策略）
+ */
+export function buildAdapterProfile(options: {
+  provider: string
+  displayName: string
+  piProvider: unknown
+  resolveRetryPolicy: (policy: unknown, label: string) => unknown
+}): Record<string, unknown> {
+  const { provider, displayName, piProvider, resolveRetryPolicy } = options
+  return {
+    provider,
+    displayName,
+    piProvider,
+    streamIdleTimeoutMs: DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+    maxRequestImageBytes: DEFAULT_MAX_REQUEST_IMAGE_BYTES,
+    requestImagePixelBudget: DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET,
+    requestImageMaxBytes: DEFAULT_REQUEST_IMAGE_MAX_BYTES,
+    retryPolicy: resolveRetryPolicy(undefined, `dsh-llamacpp-connect: provider "${provider}" retryPolicy`),
+    configuredMaxTokens: new Map(),
+    modelErrors: new Map(),
+  }
+}
+
+/**
  * 插件入口。
  *
  * **必须是箭头函数，不能写成 `export function apply(...)`。**
@@ -262,6 +313,7 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
     let PiAiAdapter: new (options: unknown) => unknown
     let createProvider: (spec: unknown) => unknown
     let openAICompletionsApi: () => unknown
+    let resolveRetryPolicy: (policy: unknown, label: string) => unknown
     try {
       ;({ PiAiAdapter } = (await import('@deepseek-ai/dsh-llm-pi-ai')) as unknown as {
         PiAiAdapter: new (options: unknown) => unknown
@@ -272,10 +324,15 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
       ;({ openAICompletionsApi } = (
         await import('@earendil-works/pi-ai/api/openai-completions.lazy')
       ) as unknown as { openAICompletionsApi: () => unknown })
+      ;({ resolveRetryPolicy } = (await import('@deepseek-ai/dsh-llm')) as unknown as {
+        resolveRetryPolicy: (policy: unknown, label: string) => unknown
+      })
     } catch (e) {
       const msg =
-        '无法加载 pi-ai 运行时依赖（@deepseek-ai/dsh-llm-pi-ai、@earendil-works/pi-ai，' +
-        `宿主必须能解析它们，请确认随 profile 一起安装）：${(e as Error)?.message ?? String(e)}`
+        '无法加载 pi-ai 运行时依赖（@deepseek-ai/dsh-llm-pi-ai、@deepseek-ai/dsh-llm、' +
+        `@earendil-works/pi-ai，宿主必须能解析它们，请确认随 profile 一起安装）：${
+          (e as Error)?.message ?? String(e)
+        }`
       state.lastError = msg
       ctx.logger?.error?.(`dsh-llamacpp-connect: ${msg}`)
       return { ok: false, count: 0, error: msg }
@@ -357,13 +414,12 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
           api: openAICompletionsApi(),
         })
 
-        const profile = {
+        const profile = buildAdapterProfile({
           provider: providerId,
           displayName: model.name,
           piProvider,
-          configuredMaxTokens: new Map(),
-          modelErrors: new Map(),
-        }
+          resolveRetryPolicy,
+        })
 
         const adapter = new PiAiAdapter({
           profiles: () => new Map([[providerId, profile]]),

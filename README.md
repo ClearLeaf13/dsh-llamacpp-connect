@@ -178,6 +178,8 @@ pnpm run check   # typecheck + test + build
 1. 对**解包后的 npm 产物**（不是 `lib/` 目录）跑一遍集成测试
 2. 产物里没有 `exports.default`（`cordis-plugin-loader` 的 `unwrapExports()` 会把组件当插件本体调用）
 3. `adapter.listModels()` 能返回模型（模型选择列表的数据源；只注册成功但枚举为空是曾经的真实故障）
+4. 插件的 `apply` 是**箭头函数**。普通函数有 `prototype`，会被 cordis 的 `isConstructor()` 当成类式插件用 `new callback(ctx, config)` 调用，**返回值不再被收集为 disposer** —— 副作用照常发生所以看起来正常，但卸载时轮询定时器泄漏、适配器不被撤销。
+5. 手搓的 pi-ai **profile 自带官方归一化的字段**。我们绕过了 `dsh-llm-pi-ai` 的 `resolveProfiles()`（未导出），而 stream 路径**直接读取**这些字段：`streamIdleTimeoutMs`（缺失即抛 `idleWatchdog timeoutMs must be a positive finite number...`）、`maxRequestImageBytes` / `requestImagePixelBudget` / `requestImageMaxBytes`、`retryPolicy`。见 `buildAdapterProfile()` 的注释。
 
 ---
 
