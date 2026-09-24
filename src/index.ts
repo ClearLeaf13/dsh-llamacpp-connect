@@ -295,6 +295,22 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
 
   let client: ControlClient | undefined
 
+  /**
+   * 按名字取一个**可选**服务。
+   *
+   * 用 `ctx.get(name)` 而不是 `ctx.attachments`：后者在服务未注入时会抛
+   * `cannot get property "attachments" without inject`，而 `get` 在服务缺失时
+   * 返回 undefined —— 这正是我们要的降级行为（官方 `dsh-llm-pi-ai` 也是这么取的，
+   * 它顶层 `inject` 同样只有 `['llm']`）。
+   */
+  const ctxGet = (name: string): unknown => {
+    try {
+      return (ctx as unknown as { get?: (n: string) => unknown }).get?.(name)
+    } catch {
+      return undefined
+    }
+  }
+
   /** 撤销全部已注册的 provider */
   const unregisterAll = () => {
     for (const reg of state.registrations.values()) {
@@ -359,6 +375,11 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
     let createProvider: (spec: unknown) => unknown
     let openAICompletionsApi: () => unknown
     let resolveRetryPolicy: (policy: unknown, label: string) => unknown
+    let resolveImageAttachmentAccess: (
+      attachments: unknown,
+      mapHostPath: (hostPath: string) => unknown,
+      ref: unknown,
+    ) => unknown
     try {
       ;({ PiAiAdapter } = (await import('@deepseek-ai/dsh-llm-pi-ai')) as unknown as {
         PiAiAdapter: new (options: unknown) => unknown
@@ -369,8 +390,15 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
       ;({ openAICompletionsApi } = (
         await import('@earendil-works/pi-ai/api/openai-completions.lazy')
       ) as unknown as { openAICompletionsApi: () => unknown })
-      ;({ resolveRetryPolicy } = (await import('@deepseek-ai/dsh-llm')) as unknown as {
+      ;({ resolveRetryPolicy, resolveImageAttachmentAccess } = (await import(
+        '@deepseek-ai/dsh-llm'
+      )) as unknown as {
         resolveRetryPolicy: (policy: unknown, label: string) => unknown
+        resolveImageAttachmentAccess: (
+          attachments: unknown,
+          mapHostPath: (hostPath: string) => unknown,
+          ref: unknown,
+        ) => unknown
       })
     } catch (e) {
       const msg =
@@ -468,10 +496,43 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
           resolveRetryPolicy,
         })
 
+        /**
+         * adapter 选项照官方 `dsh-llm-pi-ai` 的构造补全。
+         *
+         * 其中 `resolveAttachments` **必须提供**：消息里带图片时，pi-ai 会调
+         * `this.config.resolveAttachments?.()`，拿不到就抛
+         *   pi-ai image input requires the durable attachment service
+         * （dsh-llm-pi-ai:1870-1871）—— 图片上传后必然踩到。
+         *
+         * 附件与 fs 服务用 `ctx.get(...)` 取（官方也是这么写的，且它顶层
+         * `inject` 同样只有 `['llm']`）：`get` 在服务缺失时返回 undefined，
+         * 不会像属性访问那样抛 `without inject`。
+         */
         const adapter = new PiAiAdapter({
           profiles: () => new Map([[providerId, profile]]),
           auth: { apiKey: { name: '本地 llama.cpp（无需密钥）', resolve: async () => undefined } },
           resolveApiKey: async () => 'local',
+          resolveAttachments: () => ctxGet('attachments'),
+          resolveImageAccess: (attachments: unknown, ref: unknown) =>
+            resolveImageAttachmentAccess(
+              attachments,
+              (hostPath) => (ctxGet('fs') as { processPathFromHostPath?: (p: string) => unknown } | undefined)?.processPathFromHostPath?.(hostPath),
+              ref,
+            ),
+          onReplayDegrade: ({
+            provider,
+            model: modelId,
+            reason,
+          }: {
+            provider: string
+            model: string
+            reason: string
+          }) => {
+            ctx.logger?.warn?.(
+              `dsh-llamacpp-connect: 历史消息中不可用的重放状态（${provider}/${modelId}），` +
+                `该消息将以 provider 中立内容发送：${reason}`,
+            )
+          },
         })
 
         const dispose = llm.registerAdapter([providerId], adapter)
