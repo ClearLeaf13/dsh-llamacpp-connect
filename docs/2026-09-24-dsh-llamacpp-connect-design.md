@@ -1,4 +1,4 @@
-# dsh-llamacpp-connect 设计文档
+# dsh-local-llm-connect 设计文档
 
 日期：2026-09-24
 状态：待评审
@@ -25,7 +25,7 @@
 ## 3. 架构
 
 ```
-DSH 插件 (dsh-llamacpp-connect)
+DSH 插件 (dsh-local-llm-connect)
     │
     ├─ 只读 ──► %APPDATA%\llm-manager\models.json      （模型配置来源）
     │
@@ -58,7 +58,7 @@ DSH 插件 (dsh-llamacpp-connect)
 
 **复用**：直接调用现有 `startModel()` / `stopModel()` / `probeStatus()`，不重写逻辑。
 
-### B. DSH 插件侧：`dsh-llamacpp-connect`
+### B. DSH 插件侧：`dsh-local-llm-connect`
 
 | 模块 | 文件 | 职责 |
 |---|---|---|

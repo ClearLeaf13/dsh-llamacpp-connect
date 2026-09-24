@@ -1,7 +1,7 @@
 {
-  "name": "dsh-llamacpp-connect",
-  "displayName": "DSH llama.cpp Connect",
-  "description": "把本地 llama.cpp 管理器里的模型接入 DeepSeek Harness — bring local llama.cpp manager models into DeepSeek Harness.",
+  "name": "dsh-local-llm-connect",
+  "displayName": "dsh-本地LLM-connect",
+  "description": "把本地 LLM 管理器（llama.cpp / NInfer）里正在运行的模型接入 DeepSeek Harness — bring running local-manager models into DeepSeek Harness.",
   "version": "0.13.7",
   "author": "ClearLeaf13",
   "keywords": [
@@ -9,7 +9,7 @@
     "deepseek-harness",
     "deepseek",
     "llama.cpp",
-    "llamacpp",
+    "ninfer",
     "local-llm",
     "model-provider"
   ],
@@ -46,10 +46,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ClearLeaf13/dsh-llamacpp-connect.git"
+    "url": "git+https://github.com/ClearLeaf13/dsh-local-llm-connect.git"
   },
-  "homepage": "https://github.com/ClearLeaf13/dsh-llamacpp-connect#readme",
-  "bugs": "https://github.com/ClearLeaf13/dsh-llamacpp-connect/issues",
+  "homepage": "https://github.com/ClearLeaf13/dsh-local-llm-connect#readme",
+  "bugs": "https://github.com/ClearLeaf13/dsh-local-llm-connect/issues",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

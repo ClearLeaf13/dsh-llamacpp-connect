@@ -24,7 +24,7 @@ import { join } from 'node:path'
 const LIB = join(process.cwd(), 'lib', 'index.js')
 const PLUGIN_URL = 'file://' + LIB.replace(/\\/g, '/')
 
-const PROVIDER = 'llamacpp-balanced'
+const PROVIDER = 'local-llm-balanced'
 
 /** 一个最小可用的 OpenAI 兼容 SSE 响应 */
 const SSE_BODY =
@@ -115,7 +115,7 @@ describe('请求路径端到端', () => {
     const manager = await startFakeManager(model.port)
     cleanup.push(() => manager.close())
 
-    const dir = await mkdtemp(join(tmpdir(), 'llamacpp-e2e-'))
+    const dir = await mkdtemp(join(tmpdir(), 'local-llm-e2e-'))
     cleanup.push(() => rm(dir, { recursive: true, force: true }))
     await writeFile(
       join(dir, 'models.json'),

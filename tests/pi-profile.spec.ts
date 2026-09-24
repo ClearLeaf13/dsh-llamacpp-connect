@@ -34,7 +34,7 @@ function assertTimerDelay(timeoutMs: unknown, name: string): void {
 /** 与生产同样的构造方式 */
 function makeProfile() {
   return buildAdapterProfile({
-    provider: 'llamacpp-balanced',
+    provider: 'local-llm-balanced',
     displayName: 'Qwen 35B',
     piProvider: {},
     resolveRetryPolicy,
@@ -51,7 +51,7 @@ describe('pi-ai profile 必须自带官方归一化的字段', () => {
   it('负对照：缺字段的旧 profile 会被官方校验拒绝（这就是发布出去的 bug）', () => {
     // 修复前 sync() 里手写的 profile：没有 streamIdleTimeoutMs
     const buggy = {
-      provider: 'llamacpp-balanced',
+      provider: 'local-llm-balanced',
       displayName: 'Qwen 35B',
       piProvider: {},
       configuredMaxTokens: new Map(),
@@ -87,7 +87,7 @@ describe('pi-ai profile 必须自带官方归一化的字段', () => {
 
   it('保留 adapter 需要的其余字段', () => {
     const p = makeProfile()
-    expect(p.provider).toBe('llamacpp-balanced')
+    expect(p.provider).toBe('local-llm-balanced')
     expect(p.displayName).toBe('Qwen 35B')
     expect(p.piProvider).toBeDefined()
     expect(p.configuredMaxTokens).toBeInstanceOf(Map)

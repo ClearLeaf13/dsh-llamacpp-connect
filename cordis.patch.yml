@@ -2,5 +2,5 @@
 # llama.cpp manager becomes its own provider (<id>: <model-id>), so the model
 # picker shows them as separate groups. No default model is changed.
 - insert:
-    - id: llamacpp-connect
-      name: dsh-llamacpp-connect
+    - id: local-llm-connect
+      name: dsh-local-llm-connect

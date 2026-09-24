@@ -7,7 +7,7 @@ import { locateManager, controlApiAvailable, MANAGER_FILES } from '../src/discov
 let dir: string
 
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'llamacpp-disc-'))
+  dir = await mkdtemp(join(tmpdir(), 'local-llm-disc-'))
 })
 
 afterEach(async () => {

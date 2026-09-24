@@ -94,17 +94,17 @@ describe('parseModels', () => {
 
 describe('providerIdFor', () => {
   it('生成带前缀的合法 id', () => {
-    expect(providerIdFor('balanced')).toBe('llamacpp-balanced')
-    expect(providerIdFor('My Model_v2')).toBe('llamacpp-my-model-v2')
+    expect(providerIdFor('balanced')).toBe('local-llm-balanced')
+    expect(providerIdFor('My Model_v2')).toBe('local-llm-my-model-v2')
   })
 
   it('特殊字符被归一', () => {
-    expect(providerIdFor('a@b#c')).toBe('llamacpp-a-b-c')
+    expect(providerIdFor('a@b#c')).toBe('local-llm-a-b-c')
   })
 
   it('空 id 有兜底', () => {
-    expect(providerIdFor('')).toBe('llamacpp-model')
-    expect(providerIdFor('!!!')).toBe('llamacpp-model')
+    expect(providerIdFor('')).toBe('local-llm-model')
+    expect(providerIdFor('!!!')).toBe('local-llm-model')
   })
 })
 

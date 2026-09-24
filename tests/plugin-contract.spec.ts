@@ -49,8 +49,8 @@ describe('插件入口的 ctx 用法契约', () => {
   })
 
   it('两个路由路径都在源码里声明', () => {
-    expect(codeOnly).toMatch(/\/plugins\/dsh-llamacpp-connect\/status/)
-    expect(codeOnly).toMatch(/\/plugins\/dsh-llamacpp-connect\/sync/)
+    expect(codeOnly).toMatch(/\/plugins\/dsh-local-llm-connect\/status/)
+    expect(codeOnly).toMatch(/\/plugins\/dsh-local-llm-connect\/sync/)
   })
 
   it('顶层 inject 只声明 llm，webServer 走可选注入', () => {
@@ -158,8 +158,8 @@ describe('客户端与宿主的路由路径一致', () => {
   const client = readFileSync(join(process.cwd(), 'src', 'client', 'index.tsx'), 'utf8')
 
   const paths = [
-    '/plugins/dsh-llamacpp-connect/status',
-    '/plugins/dsh-llamacpp-connect/sync',
+    '/plugins/dsh-local-llm-connect/status',
+    '/plugins/dsh-local-llm-connect/sync',
   ]
 
   for (const p of paths) {
@@ -175,7 +175,7 @@ describe('客户端与宿主的路由路径一致', () => {
  *
  * 真实故障（线上稳定复现，每次重启都出现）：
  *
- *   webserver: duplicate exact route "/plugins/dsh-llamacpp-connect/status"
+ *   webserver: duplicate exact route "/plugins/dsh-local-llm-connect/status"
  *       at callback (lib/index.js:614) -> Proxy.inject -> apply (612)
  *   cannot create effect on inactive context
  *       at apply (lib/index.js:645) -> Fiber.effect
@@ -400,7 +400,7 @@ describe('client 产物格式（DSH 客户端模块）', () => {
  *
  * 真实故障（日志堆栈）：
  *   cannot get required service "llm" in inactive context
- *     at sync (.../dsh-llamacpp-connect/lib/index.js)
+ *     at sync (.../dsh-local-llm-connect/lib/index.js)
  *     at async Object.handler (.../lib/index.js)   ← /sync 路由处理器
  *
  * 成因：路由只在进程内注册一次，但处理器闭包捕获了某一次 apply 的 ctx；
@@ -514,7 +514,7 @@ describe('插件入口不可构造（disposer 才会被收集）', () => {
     vm.createContext(sandbox)
     vm.runInContext(raw, sandbox, { filename: 'client.js' })
 
-    const factory = factories.get('dsh-llamacpp-connect')
+    const factory = factories.get('dsh-local-llm-connect')
     expect(factory, 'client 产物应登记 factory').toBeDefined()
 
     const reactStub = {

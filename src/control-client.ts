@@ -1,5 +1,5 @@
 /**
- * 调用 llama.cpp 管理器的本地控制 API。
+ * 调用本地 LLM 管理器（llm-manager）的控制 API。
  *
  * 管理器在 `127.0.0.1:<port>` 暴露三个端点，全部需要
  * `Authorization: Bearer <token>`：
@@ -12,7 +12,7 @@
  *
  * 本模块只负责「说话」，不判断该不该启动 —— 那是调用方的决策。
  *
- * @module dsh-llamacpp-connect/control-client
+ * @module dsh-local-llm-connect/control-client
  */
 
 import type { ManagerLocation } from './discovery.js'

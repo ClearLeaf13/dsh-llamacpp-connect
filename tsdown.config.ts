@@ -21,7 +21,7 @@ import { defineConfig } from 'tsdown'
  * 裸 `let react = require("react")`，无 `__toESM` 包装。
  */
 
-const CLIENT_ID = 'dsh-llamacpp-connect'
+const CLIENT_ID = 'dsh-local-llm-connect'
 
 /**
  * client 半的外部依赖：由宿主模块表经 require 注入，不打进产物。

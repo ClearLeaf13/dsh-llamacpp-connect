@@ -7,10 +7,10 @@
  * 「选中即启动」在这里落地：DSH 请求某 provider 时，`ensureRunning` 会先
  * 问管理器该模型是否在跑，不在就跑起来并等端口就绪，然后再放行请求。
  *
- * @module dsh-llamacpp-connect/adapter
+ * @module dsh-local-llm-connect/adapter
  */
 
-import type { ManagerModel } from './config-store.js'
+import type { ManagerModel, Engine } from './config-store.js'
 import { baseUrlFor, providerIdFor } from './config-store.js'
 import type { ControlClient } from './control-client.js'
 
@@ -49,19 +49,38 @@ export async function portOpen(port: number, timeoutMs = 800): Promise<boolean> 
 /**
  * 模型是否已真正可服务。
  *
- * 只探端口是不够的：llama-server 会**先监听端口、后加载模型**，这期间
- * `/v1/models` 返回 503、`/health` 无响应。端口通只说明进程起来了，
- * 此时发请求会得到 503。
+ * 只探端口是不够的：两个引擎都会**先监听端口、后加载模型**，这期间请求会
+ * 得到 503 或直接挂起。端口通只说明进程起来了。
  *
- * 因此以 `/health` 返回 `{"status":"ok"}` 作为就绪判据。
+ * 两个引擎的就绪判据不同，必须分开探：
+ *
+ * | 引擎 | 判据 | 原因 |
+ * |---|---|---|
+ * | `llamacpp` | `/health` → `{"status":"ok"}` | llama-server 提供该端点 |
+ * | `ninfer` | `/v1/models` 能返回 JSON | NInfer **没有** `/health`，只能看 OpenAI 端点是否应答；它在权重加载完还要 prewarm，端口早已 accept 但 `/v1/models` 还没响应 |
+ *
+ * 管理器侧 `probeReady()` 用的是 `/v1/models` 判据（main.js:324），
+ * 这里与它保持一致，避免「管理器认为就绪、插件认为没就绪」的错判。
  */
-export async function modelReady(port: number, timeoutMs = 2_000): Promise<boolean> {
+export async function modelReady(
+  port: number,
+  timeoutMs = 2_000,
+  engine: Engine = 'llamacpp',
+): Promise<boolean> {
+  const path = engine === 'ninfer' ? '/v1/models' : '/health'
   try {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal })
+      const res = await fetch(`http://127.0.0.1:${port}${path}`, { signal: controller.signal })
       if (!res.ok) return false
+
+      if (engine === 'ninfer') {
+        // 能解析出 JSON 就算就绪 —— 与服务端的判据一致（id 可能为空）
+        await res.json()
+        return true
+      }
+
       const body = (await res.json()) as { status?: string }
       return body?.status === 'ok'
     } finally {
@@ -76,7 +95,7 @@ export async function modelReady(port: number, timeoutMs = 2_000): Promise<boole
 /**
  * 确保模型可服务，未就绪则通过管理器启动它。
  *
- * 判据是 `/health` 而不是端口可连 —— 见 {@link modelReady}。
+ * 判据按引擎走（见 {@link modelReady}），而不是端口可连。
  * 已在加载中的实例也会被等待，不重复触发启动。
  */
 export async function ensureRunning(
@@ -88,7 +107,7 @@ export async function ensureRunning(
   const pollMs = options.pollMs ?? POLL_INTERVAL_MS
 
   // 已经就绪：直接放行
-  if (await modelReady(model.port)) return { ok: true, started: false }
+  if (await modelReady(model.port, undefined, model.engine)) return { ok: true, started: false }
 
   // 端口开着但没就绪 —— 说明正在加载，等它而不是重复启动
   const loading = await portOpen(model.port)
@@ -100,7 +119,7 @@ export async function ensureRunning(
         started: false,
         error:
           `模型「${model.name}」未运行，且无法自动启动：` +
-          '未检测到管理器的控制接口。请打开 llama.cpp 管理器，' +
+          '未检测到管理器的控制接口。请打开本地 LLM 管理器，' +
           `并在其中手动启动该模型（端口 ${model.port}）。`,
       }
     }
@@ -113,7 +132,7 @@ export async function ensureRunning(
 
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if (await modelReady(model.port)) return { ok: true, started: !loading }
+    if (await modelReady(model.port, undefined, model.engine)) return { ok: true, started: !loading }
     await new Promise((r) => setTimeout(r, pollMs))
   }
 
@@ -122,7 +141,9 @@ export async function ensureRunning(
     started: !loading,
     error:
       `已请求启动，但 ${Math.round(timeoutMs / 1000)} 秒内端口 ${model.port} 仍未就绪。` +
-      '大模型首次加载可能较慢，请查看管理器日志。',
+      '大模型首次加载可能较慢，请查看管理器日志。' +
+      // NInfer 跑在 WSL 里，冷启动要先把发行版拉起来，比 llama.cpp 慢一截
+      (model.engine === 'ninfer' ? '（NInfer 在 WSL 内，冷启动可能需要更久）' : ''),
   }
 }
 

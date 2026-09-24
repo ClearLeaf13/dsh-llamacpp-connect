@@ -1,12 +1,12 @@
 /**
- * 定位本地 llama.cpp 管理器。
+ * 定位本地 LLM 管理器（llm-manager）。
  *
  * 管理器把它维护的模型配置写在 `%APPDATA%\llm-manager\models.json`，
  * 并在启动时把控制 API 的端口与令牌写到同目录。
  *
  * 本模块只做「找到并读出这些事实」，不含任何业务判断，便于单测注入。
  *
- * @module dsh-llamacpp-connect/discovery
+ * @module dsh-local-llm-connect/discovery
  */
 
 import { homedir } from 'node:os'

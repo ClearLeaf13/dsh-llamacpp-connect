@@ -1,16 +1,20 @@
 /**
- * dsh-llamacpp-connect — 把本地 llama.cpp 管理器的模型接入 DeepSeek Harness。
+ * dsh-local-llm-connect — 把本地 LLM 管理器里**正在运行**的模型接入 DeepSeek Harness。
+ *
+ * 管理器（llm-manager）一套界面管两种推理引擎，两者都提供 OpenAI 兼容端点：
+ *   - llama.cpp：Windows 原生，`.gguf`，就绪看 `/health`
+ *   - NInfer：WSL 内 `ninfer-serve`，`.ninfer`，就绪看 `/v1/models`
  *
  * host 半职责：
  *   1. 定位管理器数据目录，读出它维护的模型列表
- *   2. 每个模型注册为一个独立 provider，指向该模型的 llama-server 端口
+ *   2. 每个**正在运行**的模型注册为一个独立 provider，指向它的端口
  *   3. 注册两个同源 HTTP 路由，供 client 半读取状态、触发同步
  *
- * 设置面板（主设置 → 左侧导航「llama.cpp Connect」）完全由 client 半通过
+ * 设置面板（主设置 → 左侧导航「dsh-本地LLM-connect」）完全由 client 半通过
  * DSH 官方的 `settings.section` slot 注册，host 半不参与 —— 这是官方推荐的
  * 挂载点（`@deepseek-ai/dsh-client-ui-settings-general` 声明，注册即可见）。
  *
- * @module dsh-llamacpp-connect
+ * @module dsh-local-llm-connect
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -22,16 +26,16 @@ import { parseModels, providerIdFor, type ManagerModel } from './config-store.js
 import { ControlClient } from './control-client.js'
 import { toPiModel } from './adapter.js'
 
-export const name = 'dsh-llamacpp-connect'
+export const name = 'dsh-local-llm-connect'
 
 /** 依赖的 DSH 服务；缺任一则不加载，避免半残注册 */
 export const inject = ['llm']
 
 /** host 与 client 之间的状态通道路径 */
-export const STATUS_PATH = '/plugins/dsh-llamacpp-connect/status'
+export const STATUS_PATH = '/plugins/dsh-local-llm-connect/status'
 
 /** 同步触发路径（POST） */
-export const SYNC_PATH = '/plugins/dsh-llamacpp-connect/sync'
+export const SYNC_PATH = '/plugins/dsh-local-llm-connect/sync'
 
 /**
  * 本插件已注册的路由路径。
@@ -57,7 +61,7 @@ export interface SyncResult {
  * 旧闭包，访问 `ctx.llm` 就会抛：
  *
  *   cannot get required service "llm" in inactive context
- *   at sync (.../dsh-llamacpp-connect/lib/index.js)
+ *   at sync (.../dsh-local-llm-connect/lib/index.js)
  *   at async Object.handler (.../lib/index.js)   ← /sync 路由处理器
  *
  * （这是真实日志里出现过的堆栈。同理，`ctx.inject` / `ctx.effect` 在失效 ctx 上
@@ -144,7 +148,7 @@ export async function loadModels(
   const dirs = managerDir ? [managerDir] : undefined
   const location = await locateManager(dirs)
   if (!location) {
-    return { ok: false, error: '未检测到 llama.cpp 管理器（找不到 models.json）' }
+    return { ok: false, error: '未检测到本地 LLM 管理器（找不到 models.json）' }
   }
 
   let raw: string
@@ -257,7 +261,7 @@ export function buildAdapterProfile(options: {
     maxRequestImageBytes: DEFAULT_MAX_REQUEST_IMAGE_BYTES,
     requestImagePixelBudget: DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET,
     requestImageMaxBytes: DEFAULT_REQUEST_IMAGE_MAX_BYTES,
-    retryPolicy: resolveRetryPolicy(undefined, `dsh-llamacpp-connect: provider "${provider}" retryPolicy`),
+    retryPolicy: resolveRetryPolicy(undefined, `dsh-local-llm-connect: provider "${provider}" retryPolicy`),
     configuredMaxTokens: new Map(),
     modelErrors: new Map(),
   }
@@ -317,7 +321,7 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
       try {
         reg.dispose()
       } catch (e) {
-        ctx.logger?.warn?.(`dsh-llamacpp-connect: 撤销 ${reg.providerId} 失败`, e)
+        ctx.logger?.warn?.(`dsh-local-llm-connect: 撤销 ${reg.providerId} 失败`, e)
       }
     }
     state.registrations.clear()
@@ -365,7 +369,7 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
     if (typeof llm.registerAdapter !== 'function') {
       const msg = '宿主未提供 llm.registerAdapter，无法注册模型'
       state.lastError = msg
-      ctx.logger?.error?.(`dsh-llamacpp-connect: ${msg}`)
+      ctx.logger?.error?.(`dsh-local-llm-connect: ${msg}`)
       return { ok: false, count: 0, error: msg }
     }
 
@@ -407,7 +411,7 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
           (e as Error)?.message ?? String(e)
         }`
       state.lastError = msg
-      ctx.logger?.error?.(`dsh-llamacpp-connect: ${msg}`)
+      ctx.logger?.error?.(`dsh-local-llm-connect: ${msg}`)
       return { ok: false, count: 0, error: msg }
     }
 
@@ -424,6 +428,10 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
      * 权威来源是管理器控制接口的 `models[].running`（按端口索引）。
      * 判定不了时 —— 管理器没运行、版本过旧没有控制接口、或接口无响应 ——
      * **一个也不列**：宁可列表为空，也不让人选到跑不通的模型。
+     *
+     * 注意这里**按端口**匹配、不按 engine：管理器对 NInfer 的 running 判定是
+     * 「当前模型 && (NInfer 进程在 || 端口在听)」（api-server.js 的 /status），
+     * 它已经把引擎差异消化掉了，我们照它的结论走即可。
      */
     let ports: Set<number> | undefined
     if (client.available) {
@@ -440,7 +448,7 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
       unregisterAll()
       registeredSignature = ''
       state.lastError = msg
-      ctx.logger?.warn?.(`dsh-llamacpp-connect: ${msg}`)
+      ctx.logger?.warn?.(`dsh-local-llm-connect: ${msg}`)
       return { ok: false, count: 0, error: msg }
     }
 
@@ -510,7 +518,7 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
          */
         const adapter = new PiAiAdapter({
           profiles: () => new Map([[providerId, profile]]),
-          auth: { apiKey: { name: '本地 llama.cpp（无需密钥）', resolve: async () => undefined } },
+          auth: { apiKey: { name: '本地 LLM（无需密钥）', resolve: async () => undefined } },
           resolveApiKey: async () => 'local',
           resolveAttachments: () => ctxGet('attachments'),
           resolveImageAccess: (attachments: unknown, ref: unknown) =>
@@ -529,7 +537,7 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
             reason: string
           }) => {
             ctx.logger?.warn?.(
-              `dsh-llamacpp-connect: 历史消息中不可用的重放状态（${provider}/${modelId}），` +
+              `dsh-local-llm-connect: 历史消息中不可用的重放状态（${provider}/${modelId}），` +
                 `该消息将以 provider 中立内容发送：${reason}`,
             )
           },
@@ -538,7 +546,7 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
         const dispose = llm.registerAdapter([providerId], adapter)
         state.registrations.set(providerId, { model, providerId, dispose })
       } catch (e) {
-        ctx.logger?.warn?.(`dsh-llamacpp-connect: 注册 ${providerId} 失败`, e)
+        ctx.logger?.warn?.(`dsh-local-llm-connect: 注册 ${providerId} 失败`, e)
         state.lastError = `注册「${model.name}」失败：${(e as Error).message}`
       }
     }
@@ -549,7 +557,7 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
 
     state.lastSyncAt = Date.now()
     ctx.logger?.info?.(
-      `dsh-llamacpp-connect: 运行中 ${state.registrations.size} / 共 ${state.totalModels} 个模型` +
+      `dsh-local-llm-connect: 运行中 ${state.registrations.size} / 共 ${state.totalModels} 个模型` +
         (state.registrations.size < running.length ? '（部分注册失败）' : ''),
     )
 
@@ -597,6 +605,7 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
         port: m.port,
         ctxK: m.ctxK,
         vision: m.vision,
+        engine: m.engine,
         running: true,
       })),
       runningCount: running.length,
@@ -723,7 +732,7 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
     state.lastError = detail
     const frames = err?.stack?.split('\n').slice(0, 4).join('\n')
     ctx.logger?.warn?.(
-      `dsh-llamacpp-connect: 首次同步失败: ${detail}` + (frames ? `\n${frames}` : ''),
+      `dsh-local-llm-connect: 首次同步失败: ${detail}` + (frames ? `\n${frames}` : ''),
     )
   })
 
@@ -741,7 +750,7 @@ export const apply = (ctx: Context, config: Config): (() => void) => {
     void sync().catch((e) => {
       // 轮询失败只记日志：管理器暂时不可达不该影响插件继续提供服务
       ctx.logger?.warn?.(
-        `dsh-llamacpp-connect: 轮询失败: ${(e as Error)?.message ?? String(e)}`,
+        `dsh-local-llm-connect: 轮询失败: ${(e as Error)?.message ?? String(e)}`,
       )
     })
   }, POLL_INTERVAL_MS)

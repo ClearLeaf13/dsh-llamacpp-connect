@@ -245,7 +245,7 @@ describe('toPiModel', () => {
     const m = toPiModel(model({ id: 'vl', port: 8081, alias: 'Qwen-VL', ctxK: 32 }))
     expect(m.baseUrl).toBe('http://127.0.0.1:8081/v1')
     expect(m.id).toBe('Qwen-VL')
-    expect(m.provider).toBe('llamacpp-vl')
+    expect(m.provider).toBe('local-llm-vl')
     expect(m.api).toBe('openai-completions')
   })
 

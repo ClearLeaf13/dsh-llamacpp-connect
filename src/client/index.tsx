@@ -21,7 +21,7 @@
  * host 与 client 之间的数据通道是同源 HTTP —— 宿主用 `ctx.webServer.register()`
  * 注册两个路由，这里直接 fetch，不往 ctx 挂自定义属性。
  *
- * @module dsh-llamacpp-connect/client
+ * @module dsh-local-llm-connect/client
  */
 
 /**
@@ -39,17 +39,17 @@ declare const react: typeof import('react')
 import type { ReactElement } from 'react'
 
 /** 与宿主约定的路径，需与 index.ts 的 STATUS_PATH / SYNC_PATH 保持一致 */
-export const STATUS_PATH = '/plugins/dsh-llamacpp-connect/status'
-export const SYNC_PATH = '/plugins/dsh-llamacpp-connect/sync'
+export const STATUS_PATH = '/plugins/dsh-local-llm-connect/status'
+export const SYNC_PATH = '/plugins/dsh-local-llm-connect/sync'
 
 /** 卡片在设置面板里的 id（settings.section 是 list slot，需要 id） */
-export const SECTION_ID = 'llamacpp-connect'
+export const SECTION_ID = 'local-llm-connect'
 
 /** 依赖的客户端服务：面板注册靠 slots */
 export const inject = ['slots']
 
 /** 插件名：client 半的 name 与 host 半一致，供 loader 识别 */
-export const name = 'dsh-llamacpp-connect'
+export const name = 'dsh-local-llm-connect'
 
 export interface ModelRow {
   id: string
@@ -58,6 +58,8 @@ export interface ModelRow {
   port: number
   ctxK: number
   vision: boolean
+  /** 推理引擎：llamacpp（Windows 原生）或 ninfer（WSL 内） */
+  engine?: string
   running: boolean
 }
 
@@ -81,8 +83,8 @@ export interface StatusPayload {
 
 /** 卡片文案：模块内自足，不依赖宿主 locale 注入 */
 const zh = {
-  cardTitle: 'llama.cpp Connect',
-  cardDesc: '把本地 llama.cpp 管理器里正在运行的模型接入 DeepSeek Harness',
+  cardTitle: 'dsh-本地LLM-connect',
+  cardDesc: '把本地 LLM 管理器里正在运行的模型接入 DeepSeek Harness',
   connected: '已连接管理器',
   controlApiOn: '控制接口可用',
   controlApiOff: '无法获知运行状态',
@@ -91,12 +93,14 @@ const zh = {
   retry: '重试',
   recheck: '重新检测',
   loading: '读取中…',
-  notInstalled: '未检测到 llama.cpp 管理器。请先安装并运行它，然后在其中配置模型。',
+  notInstalled: '未检测到本地 LLM 管理器。请先安装并运行它，然后在其中配置模型。',
   running: '运行中',
   vision: '视觉',
+  engineLlama: 'llama.cpp',
+  engineNinfer: 'NInfer · WSL',
   counts: '运行中 {running} / 共 {total} 个模型',
   noRunning: '当前没有正在运行的模型。',
-  noRunningHint: '在 llama.cpp 管理器里启动模型后，这里和模型选择列表会在约 {seconds} 秒内自动更新。',
+  noRunningHint: '在本地 LLM 管理器里启动模型后，这里和模型选择列表会在约 {seconds} 秒内自动更新。',
   cannotTell: '无法获知运行状态：管理器未运行，或其版本过低没有控制接口。',
   cannotTellHint: '启动管理器后会自动恢复；也可以点上面的按钮立即重试。',
   syncDone: '已更新：运行中 {count} 个模型',
@@ -144,6 +148,14 @@ const styles = {
     gap: 4,
   } as const,
   mono: { fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 11 } as const,
+  /** 引擎标签：中性灰，与「运行中」「视觉」的彩色徽标区分开 */
+  engine: {
+    fontSize: 10,
+    padding: '1px 6px',
+    borderRadius: 4,
+    background: 'rgba(120,120,135,.12)',
+    color: '#6b6b76',
+  } as const,
   hint: { fontSize: 11, color: '#9a9aa0', lineHeight: 1.7 } as const,
 }
 
@@ -296,6 +308,12 @@ export function ConfigPage(): ReactElement {
               'div',
               { style: styles.row },
               react.createElement('span', { style: { fontWeight: 550 } }, m.name),
+              // 引擎标签：一眼看出这个模型跑在 Windows 还是 WSL 里
+              react.createElement(
+                'span',
+                { style: styles.engine },
+                m.engine === 'ninfer' ? t('engineNinfer') : t('engineLlama'),
+              ),
               m.vision && react.createElement('span', { style: styles.badge(true) }, t('vision')),
               react.createElement(
                 'span',
@@ -358,7 +376,7 @@ export const apply = (ctx: {
     )
   } catch (error) {
     console.error(
-      '[dsh-llamacpp-connect] client card failed to load (host provider unaffected):',
+      '[dsh-local-llm-connect] client card failed to load (host provider unaffected):',
       error,
     )
   }

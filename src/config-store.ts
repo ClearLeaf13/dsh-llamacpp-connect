@@ -10,8 +10,22 @@
  * 本模块对字段缺失、类型错误、文件损坏一律容错：丢弃单条坏记录而不是
  * 让整次同步失败 —— 一个模型写坏了不该让其它模型也用不了。
  *
- * @module dsh-llamacpp-connect/config-store
+ * @module dsh-local-llm-connect/config-store
  */
+
+/**
+ * 管理器支持的推理引擎。
+ *
+ * 管理器 v1.3+ 一个界面管两种引擎，`models[].engine` 标明该模型归谁：
+ *
+ * | 引擎 | 模型文件 | 运行位置 | 就绪判据 |
+ * |---|---|---|---|
+ * | `llamacpp` | `.gguf`（+ `mmproj`） | Windows 原生进程 | `/health` → `{"status":"ok"}` |
+ * | `ninfer` | `.ninfer`（自带 JSON 头） | WSL 里的 `ninfer-serve` | `/v1/models` 能返回 JSON |
+ *
+ * 两者都提供 OpenAI 兼容端点，因此接入侧只需在「就绪判据」上区分。
+ */
+export type Engine = 'llamacpp' | 'ninfer'
 
 /** 解析后的单个模型条目（只保留接入所需字段） */
 export interface ManagerModel {
@@ -23,6 +37,8 @@ export interface ManagerModel {
   /** 视觉投影文件名；非多模态模型为 undefined */
   mmproj?: string
   vision: boolean
+  /** 推理引擎；旧版 models.json 没有这个字段，按 llamacpp 处理 */
+  engine: Engine
 }
 
 export interface ParseResult {
@@ -95,15 +111,23 @@ export function parseModels(raw: string): ParseResult {
     const ctxKRaw = Number(m.ctxK)
     const ctxK = Number.isFinite(ctxKRaw) && ctxKRaw > 0 ? Math.round(ctxKRaw) : 32
 
+    // NInfer 的 .ninfer 是自包含单文件，没有独立的 mmproj 文件，
+    // 它的视觉能力记在 `ninfer.vision` 上（见 models.json 里的 qwen3-8-27b）。
+    const engine: Engine = m.engine === 'ninfer' ? 'ninfer' : 'llamacpp'
+    const visionFlag =
+      engine === 'ninfer'
+        ? m.vision === true || (m.ninfer as { vision?: unknown } | undefined)?.vision === true
+        : m.vision === true && Boolean(mmproj)
+
     models.push({
       id,
       name,
       alias,
       port,
       ctxK,
+      engine,
       mmproj: mmproj ?? undefined,
-      // 管理器里 vision 是显式开关，同时有 mmproj 才算真能看图
-      vision: m.vision === true && Boolean(mmproj),
+      vision: visionFlag,
     })
   })
 
@@ -116,7 +140,7 @@ export function providerIdFor(modelId: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-  return `llamacpp-${safe || 'model'}`
+  return `local-llm-${safe || 'model'}`
 }
 
 /** 上游 baseUrl：每个模型独占端口 */

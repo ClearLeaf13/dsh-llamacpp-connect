@@ -35,7 +35,7 @@ import { join } from 'node:path'
 
 const LIB = join(process.cwd(), 'lib', 'index.js')
 const PLUGIN_URL = 'file://' + LIB.replace(/\\/g, '/')
-const PROVIDER = 'llamacpp-vl'
+const PROVIDER = 'local-llm-vl'
 
 const SSE =
   'data: ' +
@@ -117,7 +117,7 @@ async function runImageStream(options: { withAttachments: boolean }): Promise<st
   const manager = await startManager(upstream.port)
   cleanup.push(() => manager.close())
 
-  const dir = await mkdtemp(join(tmpdir(), 'llamacpp-img-'))
+  const dir = await mkdtemp(join(tmpdir(), 'local-llm-img-'))
   cleanup.push(() => rm(dir, { recursive: true, force: true }))
   await writeFile(
     join(dir, 'models.json'),

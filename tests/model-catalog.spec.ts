@@ -54,7 +54,7 @@ function adapterWith(piProvider: unknown) {
   }
   return new PiAiAdapter({
     profiles: () => new Map([[PROVIDER_ID, profile]]),
-    auth: { apiKey: { name: '本地 llama.cpp（无需密钥）', resolve: async () => undefined } },
+    auth: { apiKey: { name: '本地 LLM（无需密钥）', resolve: async () => undefined } },
     resolveApiKey: async () => 'local',
   })
 }
@@ -67,7 +67,7 @@ describe('模型目录：provider 必须用 pi-ai 的 createProvider 构造', ()
         id: PROVIDER_ID,
         name: MODEL.name,
         baseUrl: piModel.baseUrl,
-        auth: { apiKey: { name: '本地 llama.cpp（无需密钥）', resolve: async () => undefined } },
+        auth: { apiKey: { name: '本地 LLM（无需密钥）', resolve: async () => undefined } },
         models: [piModel],
         api: openAICompletionsApi(),
       }),

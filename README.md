@@ -1,16 +1,16 @@
-# dsh-llamacpp-connect
+# dsh-local-llm-connect
 
-把本地 **llama.cpp 管理器**里**正在运行**的模型接入 [DeepSeek Harness](https://www.deepseek.com/harness/)，启动即出现、停止即消失。
+把本地 **LLM 管理器**（llama.cpp / NInfer 双引擎）里**正在运行**的模型接入 [DeepSeek Harness](https://www.deepseek.com/harness/)，启动即出现、停止即消失。
 
-Bring the models **currently running** in your local **llama.cpp manager** into DeepSeek Harness.
+Bring the models **currently running** in your local **LLM manager** (llama.cpp + NInfer) into DeepSeek Harness.
 
 ---
 
 ## 它做什么
 
-你在 llama.cpp 管理器里维护模型、决定谁在跑。这个插件让 DSH 的模型选择列表**始终等于你当前正在运行的那几个模型**：
+你在本地 LLM 管理器里维护模型、决定谁在跑。管理器一套界面同时管 Windows 上的 llama.cpp 和 WSL 里的 NInfer，插件对两种引擎一视同仁。这个插件让 DSH 的模型选择列表**始终等于你当前正在运行的那几个模型**：
 
-1. **自动发现**本机的 llama.cpp 管理器，读出它维护的模型列表
+1. **自动发现**本机的 LLM 管理器，读出它维护的模型列表
 2. **只注册正在运行的模型**——每个模型一个独立 provider，在模型选择里单独成组
 3. **自动跟随**——每 15 秒重新评估一次；你在管理器里启动或停止模型，列表自动增删，不需要手动操作
 4. 配置页可以查看当前状态，也可以点**「立即刷新」**马上同步一次
@@ -24,8 +24,8 @@ Bring the models **currently running** in your local **llama.cpp manager** into 
 | 依赖 | 说明 |
 |---|---|
 | [DeepSeek Harness](https://www.deepseek.com/harness/) | 宿主 |
-| [llm-manager](https://github.com/ClearLeaf13/llm-manager) | 本地 llama.cpp 管理器，**v1.2.0 或更高**（需要其控制接口） |
-| llama.cpp | 由管理器自行管理，本插件不直接调用 |
+| [llm-manager](https://github.com/ClearLeaf13/llm-manager) | 本地 LLM 管理器，**v1.3.0 或更高**（需要其控制接口；v1.3 起支持 NInfer） |
+| llama.cpp / NInfer | 由管理器自行管理，本插件不直接调用；WSL 里的 NInfer 需在管理器设置里配好 |
 | Node.js | ^22.19.0 或 >=24 |
 
 **控制接口说明**：判断「谁在运行」依赖管理器的本地控制 API（`127.0.0.1:8765`，带一次性令牌）。管理器版本低于 v1.2.0、或管理器当前没在运行时，插件**无法获知运行状态**，此时它不会列出任何模型（配置页会说明原因并给出「立即刷新」按钮）。打开管理器后约 15 秒内自动恢复。
@@ -35,7 +35,7 @@ Bring the models **currently running** in your local **llama.cpp manager** into 
 ## 安装
 
 ```bash
-dsh plugin --profile web add dsh-llamacpp-connect
+dsh plugin --profile web add dsh-local-llm-connect
 ```
 
 装好后重启 DSH Web UI。
@@ -46,7 +46,7 @@ dsh plugin --profile web add dsh-llamacpp-connect
 dsh --profile web --dump-config
 ```
 
-应能在插件树里看到 `llamacpp-connect` 一行。
+应能在插件树里看到 `local-llm-connect` 一行。
 
 ---
 
@@ -54,15 +54,15 @@ dsh --profile web --dump-config
 
 ### 首次使用
 
-1. 打开 **llama.cpp 管理器**，确认里面已经配置好模型
+1. 打开 **本地 LLM 管理器**，确认里面已经配置好模型
 2. 在管理器里**启动**你要用的模型
-3. 打开 **DSH 设置 → llama.cpp Connect** 可以看到当前有几个在运行（也可直接看模型选择列表）
+3. 打开 **DSH 设置 → dsh-本地LLM-connect** 可以看到当前有几个在运行（也可直接看模型选择列表）
 
 正在运行的模型会自动出现在 DSH 的模型选择器里，每个模型单独成组。
 
 ### 启动 / 停止模型
 
-在 llama.cpp 管理器里操作即可，DSH 侧会自动跟上：
+在本地 LLM 管理器里操作即可，DSH 侧会自动跟上：
 
 - **启动**一个模型 → 约 15 秒内出现在模型选择列表里
 - **停止**一个模型 → 约 15 秒内从列表里消失
@@ -86,7 +86,7 @@ dsh --profile web --dump-config
 在 profile 的 `cordis.patch.yml` 里覆盖：
 
 ```yaml
-- id: llamacpp-connect
+- id: local-llm-connect
   config:
     managerDir: 'D:\path\to\llm-manager'
 ```
@@ -115,17 +115,32 @@ DSH 插件
 
 只有管理器控制接口报告 `running: true` 的模型才会被注册。判定不了运行状态时**一个也不注册**——宁可列表为空，也不让人选到一个必然报错的模型。
 
+### 两种推理引擎
+
+管理器 v1.3 起一个界面管两种引擎，插件对二者一视同仁——都注册成 OpenAI 兼容 provider。差异只在**就绪判据**上，因为两种服务暴露的端点不同：
+
+| 引擎 | 模型文件 | 运行位置 | 就绪判据 |
+|---|---|---|---|
+| `llamacpp` | `.gguf`（+ `mmproj`） | Windows 原生进程 | `/health` 返回 `{"status":"ok"}` |
+| `ninfer` | `.ninfer`（自包含单文件） | WSL 里的 `ninfer-serve` | `/v1/models` 能返回 JSON |
+
+NInfer **没有** `/health` 端点，所以不能用 llama.cpp 的判据去探它。反过来 NInfer 在权重加载完之后还要 prewarm：端口早已 accept，但 `/v1/models` 还没响应——只探端口会把「还在预热」误判成「已就绪」。插件按 `models[].engine` 分别探测，与管理器内部 `probeReady()` 的判据保持一致。
+
+配置页每个模型旁边会标出它跑在哪个引擎上（`llama.cpp` 或 `NInfer · WSL`）。
+
+视觉能力也从各引擎自己的声明处读取：llama.cpp 要求 `vision: true` **且** `mmproj` 文件非空；NInfer 的 `.ninfer` 是自包含的、没有独立 mmproj 文件，它的视觉开关记在 `ninfer.vision` 上。
+
 ---
 
 ## 常见问题
 
-**配置页显示「未检测到 llama.cpp 管理器」**
+**配置页显示「未检测到本地 LLM 管理器」**
 
 管理器没装，或数据目录不在探测范围内。装了的话，用 `managerDir` 手动指定。
 
 **配置页显示「运行中 0 / 共 N 个模型」**
 
-模型都配置好了，但一个都没在跑。到 llama.cpp 管理器里启动你要用的模型，约 15 秒内会自动出现。
+模型都配置好了，但一个都没在跑。到本地 LLM 管理器里启动你要用的模型，约 15 秒内会自动出现。
 
 **显示「无法获知运行状态」**
 
@@ -168,6 +183,7 @@ pnpm run check   # typecheck + test + build
 测试分层：
 
 - **单元测试**（`config-store` / `discovery` / `control-client` / `adapter`）不依赖真实 llama.cpp
+- **引擎测试**（`engine`）锁定双引擎差异：`engine` 字段解析、按引擎选择就绪端点（`/health` vs `/v1/models`）、NInfer 的视觉声明来自 `ninfer.vision`
 - **契约测试**（`plugin-contract`）读源码与构建产物，锁定 DSH 加载器契约（无 default 导出、裸 require react、路由幂等、`live` 代际委派……）
 - **集成测试**（`running-filter` / `model-catalog`）把**构建产物装进真实 Cordis 宿主**，配一个**假的管理器 HTTP 服务**，验证「只注册运行中的模型」「集合未变不重注册」「拿不到状态就不列」以及模型确实能被枚举出来
 
@@ -182,6 +198,7 @@ pnpm run check   # typecheck + test + build
 5. 手搓的 pi-ai **profile 自带官方归一化的字段**。我们绕过了 `dsh-llm-pi-ai` 的 `resolveProfiles()`（未导出），而 stream 路径**直接读取**这些字段：`streamIdleTimeoutMs`（缺失即抛 `idleWatchdog timeoutMs must be a positive finite number...`）、`maxRequestImageBytes` / `requestImagePixelBudget` / `requestImageMaxBytes`、`retryPolicy`。见 `buildAdapterProfile()` 的注释。
 6. provider 的 auth 用官方 `harnessApiKeyAuth` 的**嵌套形状** `{ apiKey: { name, resolve } }`，且 `resolve` **必须返回对象**（无凭据时返回 `{ auth: {} }`）。少嵌一层、或返回 `undefined`，pi-ai 的 `applyAuth()` 都会判为未配置，在请求发出前抛 `Provider is not configured: <provider>`。见 `keylessApiKeyAuth()` 的注释。
 7. 端到端测试（`tests/stream-e2e.spec.ts`）会真的发一次 stream。注意 **pi-ai 把失败作为「流片段」返回而不是抛出** —— 只断言「有没有抛错」会漏判，必须检查片段内容。
+8. 改了就绪探测相关代码时，**故意把它改坏**（例如让 `modelReady` 忽略 `engine` 一律探 `/health`）确认 `engine.spec.ts` 会红——否则那批用例可能只是在复述实现。
 
 ---
 

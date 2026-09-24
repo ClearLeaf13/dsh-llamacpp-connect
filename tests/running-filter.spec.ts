@@ -19,8 +19,8 @@ import { join } from 'node:path'
 const LIB = join(process.cwd(), 'lib', 'index.js')
 const PLUGIN_URL = 'file://' + LIB.replace(/\\/g, '/')
 
-const STATUS_PATH = '/plugins/dsh-llamacpp-connect/status'
-const SYNC_PATH = '/plugins/dsh-llamacpp-connect/sync'
+const STATUS_PATH = '/plugins/dsh-local-llm-connect/status'
+const SYNC_PATH = '/plugins/dsh-local-llm-connect/sync'
 
 type FixtureModel = {
   id: string
@@ -117,7 +117,7 @@ async function startManager(runningIds: string[]): Promise<Manager> {
 
 /** 一个可被 locateManager 认出的管理器数据目录 */
 async function writeManagerDir(apiPort: number): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'llamacpp-run-'))
+  const dir = await mkdtemp(join(tmpdir(), 'local-llm-run-'))
   await writeFile(join(dir, 'models.json'), JSON.stringify({ version: 1, models: MODELS }), 'utf8')
   await writeFile(join(dir, 'api-port.txt'), String(apiPort), 'utf8')
   await writeFile(join(dir, 'api-token.txt'), 'test-token', 'utf8')
@@ -263,7 +263,7 @@ describe('模型集合由「正在运行」决定', () => {
     await waitFor(() => h.registered.length > 0, '注册运行中的模型')
 
     // 只有 balanced 在运行 → 只注册它
-    expect(h.registered).toEqual(['llamacpp-balanced'])
+    expect(h.registered).toEqual(['local-llm-balanced'])
 
     const st = await h.status()
     expect(st.runningCount).toBe(1)
@@ -281,15 +281,15 @@ describe('模型集合由「正在运行」决定', () => {
 
     const h = await boot(dir)
     await waitFor(() => h.registered.length === 1, '首次同步')
-    expect(h.registered).toEqual(['llamacpp-balanced'])
+    expect(h.registered).toEqual(['local-llm-balanced'])
 
     // 管理器里又启动了一个模型 → 重新注册为「两个」
     manager.setRunning(['balanced', 'vl'])
     const up = await h.sync()
     expect(up.count).toBe(2)
     expect(h.registered.slice(1), '增删应为「仅注册运行中的」').toEqual([
-      'llamacpp-balanced',
-      'llamacpp-vl',
+      'local-llm-balanced',
+      'local-llm-vl',
     ])
 
     let st = await h.status()
@@ -300,7 +300,7 @@ describe('模型集合由「正在运行」决定', () => {
     manager.setRunning(['vl'])
     const down = await h.sync()
     expect(down.count).toBe(1)
-    expect(h.registered.slice(3)).toEqual(['llamacpp-vl'])
+    expect(h.registered.slice(3)).toEqual(['local-llm-vl'])
 
     st = await h.status()
     expect(st.runningCount).toBe(1)
@@ -320,7 +320,7 @@ describe('模型集合由「正在运行」决定', () => {
     await h.sync()
     await h.sync()
 
-    expect(h.registered, '集合未变时不应再次 registerAdapter').toEqual(['llamacpp-balanced'])
+    expect(h.registered, '集合未变时不应再次 registerAdapter').toEqual(['local-llm-balanced'])
   })
 
   it('拿不到运行状态时一个模型也不列', async () => {
@@ -382,7 +382,7 @@ describe('模型集合由「正在运行」决定', () => {
     const h = await boot(dir)
     await waitFor(() => h.registered.length === 1, '首次同步')
 
-    const provider = 'llamacpp-balanced'
+    const provider = 'local-llm-balanced'
     const adapter = h.adapters[0]!
     const models = await adapter.listModels(provider)
     expect(models.length, '适配器应能列出模型').toBeGreaterThan(0)
