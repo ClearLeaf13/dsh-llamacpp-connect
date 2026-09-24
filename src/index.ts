@@ -42,6 +42,37 @@ export const SYNC_PATH = '/plugins/dsh-llamacpp-connect/sync'
  */
 const registeredRoutes = new Set<string>()
 
+/** 一次同步的结果 */
+export interface SyncResult {
+  ok: boolean
+  count: number
+  error?: string
+}
+
+/**
+ * 当前「活跃代」的对外处理逻辑。
+ *
+ * 路由在一个进程内只注册一次，但它的处理器**不能闭包捕获某一次 apply 的 ctx**：
+ * HMR / patch 热重载会重新执行 `apply`，上一代的 ctx 随即失效。若处理器仍指向
+ * 旧闭包，访问 `ctx.llm` 就会抛：
+ *
+ *   cannot get required service "llm" in inactive context
+ *   at sync (.../dsh-llamacpp-connect/lib/index.js)
+ *   at async Object.handler (.../lib/index.js)   ← /sync 路由处理器
+ *
+ * （这是真实日志里出现过的堆栈。同理，`ctx.inject` / `ctx.effect` 在失效 ctx 上
+ * 也会抛 `cannot create effect on inactive context`。）
+ *
+ * 因此处理器统一从 `live` 取**当前代**的实现：每次 apply 发布自己，卸载时清空。
+ * 插件被停用后处理器明确返回 503，而不是去碰已经死掉的 ctx。
+ */
+interface LiveGeneration {
+  sync: () => Promise<SyncResult>
+  status: () => Promise<unknown>
+}
+
+let live: LiveGeneration | undefined
+
 /** 路由响应的最小接口 —— 只用到 writeHead/end，避免依赖具体实现 */
 interface RouteResponse {
   writeHead: (code: number, headers: Record<string, string>) => void
@@ -145,12 +176,15 @@ export function apply(ctx: Context, config: Config): () => void {
   }
 
   /**
-   * 同步：重读管理器配置，重建 provider 注册。
+   * 单次同步的实现：重读管理器配置，重建 provider 注册。
    *
    * 先全部撤销再重建，而不是增量 diff —— provider 的模型列表在 DSH 侧
    * 是快照语义，增量更新容易留下已删除模型的残影。
+   *
+   * 顺序上刻意把「解析适配器类」放在 `unregisterAll()` **之前**：解析失败时
+   * 保留已有 provider，而不是拆掉旧的又装不上新的、让模型全部消失。
    */
-  const sync = async (): Promise<{ ok: boolean; count: number; error?: string }> => {
+  const runSync = async (): Promise<SyncResult> => {
     const loaded = await loadModels(config.managerDir || undefined)
     if (!loaded.ok) {
       state.lastError = loaded.error
@@ -158,15 +192,6 @@ export function apply(ctx: Context, config: Config): () => void {
       state.models = []
       return { ok: false, count: 0, error: loaded.error }
     }
-
-    state.location = loaded.location
-    state.models = loaded.models
-    state.skipped = loaded.skipped
-    state.controlApi = Boolean(loaded.location.apiPort && loaded.location.apiToken)
-    state.lastError = undefined
-    client = new ControlClient(loaded.location)
-
-    unregisterAll()
 
     const llm = ctx.llm as unknown as {
       registerAdapter?: (ids: string[], adapter: unknown) => () => void
@@ -179,10 +204,30 @@ export function apply(ctx: Context, config: Config): () => void {
       return { ok: false, count: 0, error: msg }
     }
 
-    // 动态加载 peer，避免树外包静态 import 解析不到
-    const { PiAiAdapter } = (await import('@deepseek-ai/dsh-llm-pi-ai')) as unknown as {
-      PiAiAdapter: new (options: unknown) => unknown
+    // 动态加载 peer（静态 import 在树外产物里可能解析不到）。失败时给出明确
+    // 原因，而不是让它冒泡到最外层、只剩一句「首次同步失败 {}」。
+    let PiAiAdapter: new (options: unknown) => unknown
+    try {
+      ;({ PiAiAdapter } = (await import('@deepseek-ai/dsh-llm-pi-ai')) as unknown as {
+        PiAiAdapter: new (options: unknown) => unknown
+      })
+    } catch (e) {
+      const msg =
+        '无法加载 @deepseek-ai/dsh-llm-pi-ai（宿主必须能解析该包，' +
+        `请确认它随 profile 一起安装）：${(e as Error)?.message ?? String(e)}`
+      state.lastError = msg
+      ctx.logger?.error?.(`dsh-llamacpp-connect: ${msg}`)
+      return { ok: false, count: 0, error: msg }
     }
+
+    state.location = loaded.location
+    state.models = loaded.models
+    state.skipped = loaded.skipped
+    state.controlApi = Boolean(loaded.location.apiPort && loaded.location.apiToken)
+    state.lastError = undefined
+    client = new ControlClient(loaded.location)
+
+    unregisterAll()
 
     for (const model of loaded.models) {
       const providerId = providerIdFor(model.id)
@@ -226,6 +271,25 @@ export function apply(ctx: Context, config: Config): () => void {
     )
 
     return { ok: true, count: state.registrations.size }
+  }
+
+  /**
+   * 串行化的同步入口（启动时与 POST /sync 共用同一条队列）。
+   *
+   * 两者可能并发：都会先 `unregisterAll()` 再 `registerAdapter`，而
+   * `llm.registerAdapter` 对已注册的 provider 会抛 `DUPLICATE_ADAPTER`
+   * （dsh-llm/lib/index.js:1810）。失败一方的本地 registrations 与真实注册表
+   * 不一致，后续 `unregisterAll()` 清不到那些 provider —— 表现为模型凭空消失。
+   * 用一条 promise 链把同步排成队列，消除交错。
+   */
+  let syncTail: Promise<unknown> = Promise.resolve()
+  const sync = (): Promise<SyncResult> => {
+    const run = syncTail.then(() => runSync())
+    syncTail = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
   }
 
   /**
@@ -298,6 +362,10 @@ export function apply(ctx: Context, config: Config): () => void {
    * 上重新执行整个 `apply`，宿主路由表是全局的，重复注册会抛
    * `webserver: duplicate exact route "..."`。注册前先探测、已存在则跳过。
    */
+  // 发布本代逻辑。处理器通过 live 取「当前代」，而不是闭包捕获本次 apply 的 ctx
+  // —— 否则 HMR 重载后旧处理器会去访问已失效的 ctx（见 LiveGeneration 注释）。
+  live = { sync, status: buildStatusPayload }
+
   ctx.inject(['webServer'], (webCtx: unknown) => {
     const server = (
       webCtx as {
@@ -308,13 +376,21 @@ export function apply(ctx: Context, config: Config): () => void {
       }
     ).webServer
 
+    /**
+     * 路由是否已在本宿主实例上注册。
+     *
+     * **优先问宿主的路由表**（权威来源），只有拿不到 `exact` 时才回退到本模块
+     * 自己的集合。顺序不能反：模块级集合会跨 HMR 代际残留，若它短路在前，
+     * 一旦宿主路由表被重建，这里会永远返回「已注册」而**静默地不再注册路由**。
+     */
     const alreadyRegistered = (path: string): boolean => {
-      if (registeredRoutes.has(path)) return true
       try {
-        return server.exact?.has?.(path) === true
+        const probed = server.exact?.has?.(path)
+        if (typeof probed === 'boolean') return probed
       } catch {
-        return false
+        /* 该字段不可用或抛错：回退到本地集合 */
       }
+      return registeredRoutes.has(path)
     }
 
     const registerOnce = (route: {
@@ -335,7 +411,18 @@ export function apply(ctx: Context, config: Config): () => void {
         if (req.method && req.method !== 'GET') {
           return sendJson(res, 405, { ok: false, error: '仅支持 GET' })
         }
-        sendJson(res, 200, await buildStatusPayload())
+        const current = live
+        if (!current) {
+          return sendJson(res, 503, {
+            ok: false,
+            installed: false,
+            controlApi: false,
+            models: [],
+            skipped: [],
+            lastError: '插件未就绪或已卸载',
+          })
+        }
+        sendJson(res, 200, await current.status())
       },
     })
 
@@ -347,20 +434,37 @@ export function apply(ctx: Context, config: Config): () => void {
         if (req.method && req.method !== 'POST') {
           return sendJson(res, 405, { ok: false, error: '仅支持 POST' })
         }
-        const r = await sync()
+        const current = live
+        if (!current) {
+          return sendJson(res, 503, {
+            ok: false,
+            count: 0,
+            error: '插件未就绪或已卸载',
+            state: null,
+          })
+        }
+        const r = await current.sync()
         sendJson(res, r.ok ? 200 : 500, {
           ...r,
           // 同步完顺带回一份最新状态，省掉客户端再取一次
-          state: await buildStatusPayload(),
+          state: await current.status(),
         })
       },
     })
   })
 
-  // 启动时同步一次；失败不抛出，插件加载不应因管理器缺失而失败
+  // 启动时同步一次；失败不抛出，插件加载不应因管理器缺失而失败。
+  //
+  // 日志必须显式带上 message 与首帧堆栈：只把 error 对象交给 logger 会被格式化
+  // 成 `{}`（Error 的属性不可枚举），真因曾因此长期不可见。
   void sync().catch((e) => {
-    state.lastError = (e as Error).message
-    ctx.logger?.warn?.('dsh-llamacpp-connect: 首次同步失败', e)
+    const err = e as Error
+    const detail = err?.message ?? String(e)
+    state.lastError = detail
+    const frames = err?.stack?.split('\n').slice(0, 4).join('\n')
+    ctx.logger?.warn?.(
+      `dsh-llamacpp-connect: 首次同步失败: ${detail}` + (frames ? `\n${frames}` : ''),
+    )
   })
 
   // 插件卸载时清理注册，避免残留 provider。
@@ -371,6 +475,9 @@ export function apply(ctx: Context, config: Config): () => void {
   // Cordis 的 runner 直接收集（cordis/lib/index.js:1140/1068），
   // 不经过 fiber 活跃性检查，重跑时同样能正确登记。
   return () => {
+    // 只有自己仍是「当前代」时才清空 live，避免把后来者的代一起清掉。
+    // 清空后路由处理器会明确返回 503，而不是访问已失效的 ctx。
+    if (live?.sync === sync) live = undefined
     unregisterAll()
   }
 }

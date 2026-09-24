@@ -25,13 +25,15 @@
  */
 
 /**
- * react / react/jsx-runtime 由构建 banner 以裸 `require("react")` /
- * `require("react/jsx-runtime")` 注入为模块内变量（见 tsdown.config.ts），
+ * react 由构建 banner 以裸 `require("react")` 注入为模块内变量（见 tsdown.config.ts），
  * 这里只做类型声明、不写 import —— 这是官方 client 包的产物形态，
  * 避免 rolldown 对 external 的 `__toESM` 包装把 `react.useState` 弄成 null。
+ *
+ * 不声明/不 require `react/jsx-runtime`：本组件只用 `react.createElement`。
+ * 客户端模块系统里一次 require 未命中会让**整个 factory** 物化失败，
+ * 用不到的依赖不引入。
  */
 declare const react: typeof import('react')
-declare const react_jsx_runtime: typeof import('react/jsx-runtime')
 
 /** 纯类型导入：只用于标注组件返回类型，不产生运行时代码 */
 import type { ReactElement } from 'react'

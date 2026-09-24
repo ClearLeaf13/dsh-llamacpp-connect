@@ -334,10 +334,18 @@ describe('client 产物格式（DSH 客户端模块）', () => {
     // 对齐官方 client 包：react 由 banner 裸 require 注入，无包装。
     const raw = readFileSync(clientPath, 'utf8')
     expect(raw).toMatch(/const react = require\("react"\)/)
-    expect(raw).toMatch(/const react_jsx_runtime = require\("react\/jsx-runtime"\)/)
     // 绝不能出现把 react 二次包装成 ESM namespace 的 __toESM 调用
     expect(raw).not.toMatch(/__toESM\(\s*react\b/)
     expect(raw).not.toMatch(/react = __toESM/)
+  })
+
+  it('不 require 用不到的 react/jsx-runtime（一次未命中会炸掉整个 factory）', () => {
+    // 本组件只用 react.createElement。客户端模块系统里 require 未命中会抛错并
+    // 让整个 factory 物化失败（dsh-client-modules/lib/client.js:300-309），
+    // 因此不引入用不到的依赖。
+    const raw = readFileSync(clientPath, 'utf8')
+    expect(raw).not.toMatch(/require\("react\/jsx-runtime"\)/)
+    expect(raw).not.toMatch(/react_jsx_runtime/)
   })
 
   it('产物不得带 default 导出（否则组件会被当成插件本体直接调用）', () => {
@@ -363,5 +371,87 @@ describe('client 产物格式（DSH 客户端模块）', () => {
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/^\s*\/\/.*$/gm, '')
     expect(sourceCodeOnly).not.toMatch(/export\s+default\s/)
+  })
+
+  it('client 的 .d.ts 不得被 banner/footer 污染（必须是合法 TypeScript）', () => {
+    // 真实缺陷：banner/footer 早先用统一字符串形式，于是 .d.ts 也被裹上
+    // `window.__ModuleLoader__.load({...` 并以 `return module.exports; } });` 结尾，
+    // 而 package.json 的 exports["./client"].types 正指向该文件。
+    // 修法是 tsdown 的 ChunkAddonObject（{ js }）只作用于 JS chunk。
+    const dtsPath = join(process.cwd(), 'lib', 'client', 'index.d.ts')
+    let dts: string
+    try {
+      dts = readFileSync(dtsPath, 'utf8')
+    } catch {
+      throw new Error(`client 声明文件未生成：${dtsPath} 不存在，请先 pnpm run build`)
+    }
+    expect(dts).not.toContain('__ModuleLoader__')
+    expect(dts).not.toContain('module.exports')
+    // 必须仍是可用的声明文件
+    expect(dts).toMatch(/export /)
+  })
+})
+
+/**
+ * 防回归：host 半在 HMR / patch 热重载下的健壮性。
+ *
+ * 真实故障（日志堆栈）：
+ *   cannot get required service "llm" in inactive context
+ *     at sync (.../dsh-llamacpp-connect/lib/index.js)
+ *     at async Object.handler (.../lib/index.js)   ← /sync 路由处理器
+ *
+ * 成因：路由只在进程内注册一次，但处理器闭包捕获了某一次 apply 的 ctx；
+ * 热重载后该 ctx 失效，点「同步模型」就会去读死 ctx。
+ * 修法：处理器统一从模块级 `live` 取当前代实现；卸载时清空 → 明确返回 503。
+ */
+describe('host 半的热重载健壮性契约', () => {
+  const host = readFileSync(join(process.cwd(), 'src', 'index.ts'), 'utf8')
+  const codeOnly = host
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+
+  it('路由处理器通过模块级 live 取当前代，而不是直接闭包捕获 ctx', () => {
+    expect(codeOnly).toMatch(/let live: LiveGeneration \| undefined/)
+    expect(codeOnly).toMatch(/live = \{ sync, status: buildStatusPayload \}/)
+    // 两个处理器都必须经 live 取当前代
+    const handlerUses = codeOnly.match(/const current = live/g) ?? []
+    expect(handlerUses.length, '两个路由处理器都应经 live 取当前代').toBe(2)
+    expect(codeOnly).toMatch(/await current\.sync\(\)/)
+    expect(codeOnly).toMatch(/await current\.status\(\)/)
+    // 不得再直接调用本次 apply 的 sync / buildStatusPayload
+    expect(codeOnly).not.toMatch(/await sync\(\)/)
+    expect(codeOnly).not.toMatch(/await buildStatusPayload\(\)/)
+  })
+
+  it('卸载时清空 live，且只在仍是当前代时清', () => {
+    expect(codeOnly).toMatch(/if \(live\?\.sync === sync\) live = undefined/)
+  })
+
+  it('同步串行化，避免并发触发 DUPLICATE_ADAPTER', () => {
+    expect(codeOnly).toMatch(/let syncTail: Promise<unknown> = Promise\.resolve\(\)/)
+    expect(codeOnly).toMatch(/syncTail\.then\(\(\) => runSync\(\)\)/)
+  })
+
+  it('路由存在性以宿主路由表为准，模块级集合只作兜底', () => {
+    // 顺序不能反：模块级集合跨 HMR 代际残留，短路在前会导致路由被静默漏注册
+    const fnBody = codeOnly.slice(codeOnly.indexOf('const alreadyRegistered'))
+    const probeAt = fnBody.indexOf('server.exact')
+    const setAt = fnBody.indexOf('registeredRoutes.has')
+    expect(probeAt, '应优先探测宿主路由表').toBeGreaterThan(-1)
+    expect(setAt, '应有本地集合兜底').toBeGreaterThan(-1)
+    expect(probeAt, '宿主探测必须排在本地集合之前').toBeLessThan(setAt)
+  })
+
+  it('同步失败日志带 message，不能只甩 error 对象（会被格式化成 {}）', () => {
+    expect(codeOnly).toMatch(/const detail = err\?\.message \?\? String\(e\)/)
+    expect(codeOnly).toMatch(/首次同步失败: \$\{detail\}/)
+  })
+
+  it('解析适配器失败时不破坏已有 provider（import 在 unregisterAll 之前）', () => {
+    const body = codeOnly.slice(codeOnly.indexOf('const runSync'))
+    const importAt = body.indexOf("await import('@deepseek-ai/dsh-llm-pi-ai')")
+    const unregisterAt = body.indexOf('unregisterAll()', importAt)
+    expect(importAt, 'runSync 里应有动态 import').toBeGreaterThan(-1)
+    expect(unregisterAt, 'import 之后才撤销旧注册').toBeGreaterThan(importAt)
   })
 })

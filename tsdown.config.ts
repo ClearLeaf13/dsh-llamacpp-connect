@@ -67,17 +67,21 @@ export default defineConfig([
     dts: true,
     clean: false,
     external: CLIENT_EXTERNAL,
-    banner: (chunk) => {
-      // 入口 chunk 是主 factory；多 chunk 时用 chunk: 字段（本插件单入口，仅主）
-      // 必须在 factory 体内声明 module/exports，产物里的 exports.xxx / module.exports
-      // 才能解析（与官方 client 包 lib/client.js 头部一致）。
+    banner: {
+      // 只给 JS chunk 加 banner。tsdown 的 ChunkAddon 支持按扩展名区分
+      // （ChunkAddonObject = { js?, css?, dts? }）；若用统一函数/字符串形式，
+      // `.d.ts` 会被同一个 banner 裹住，产出以 `window.__ModuleLoader__.load({`
+      // 开头的**非法 TypeScript**，而 package.json 的 exports["./client"].types
+      // 正指向该文件。
       //
-      // react / react/jsx-runtime 在此以裸 require 注入为模块内变量，避免 rolldown
-      // 对 external 的 `__toESM` 包装（那会让 react.useState 变 undefined）。
-      return `window.__ModuleLoader__.load({ id: ${JSON.stringify(CLIENT_ID)}, factory: (require) => {\n\t\tvar module = { exports: {} };\n\t\tvar exports = module.exports;\n\t\tconst react = require("react");\n\t\tconst react_jsx_runtime = require("react/jsx-runtime");`
+      // react 以裸 require 注入为模块内变量，避免 rolldown 对 external 的
+      // `__toESM` 包装（它会让 react.useState 变 undefined）。
+      // 不注入 react/jsx-runtime：本插件只用 react.createElement，
+      // 而一次 require 未命中会让整个 factory 物化失败 —— 少一份耦合少一个致命点。
+      js: `window.__ModuleLoader__.load({ id: ${JSON.stringify(CLIENT_ID)}, factory: (require) => {\n\t\tvar module = { exports: {} };\n\t\tvar exports = module.exports;\n\t\tconst react = require("react");`,
     },
-    footer: () => {
-      return `\t\treturn module.exports;\n\t}\n});`
+    footer: {
+      js: `\t\treturn module.exports;\n\t}\n});`,
     },
   },
 ])
